@@ -1,4 +1,4 @@
-import type { SelectionMode } from "../core/selection";
+import type { SelectionMode } from "../core/selection/selection";
 
 const APP_SHELL_CSS_ID = "potter-app-shell-css";
 
