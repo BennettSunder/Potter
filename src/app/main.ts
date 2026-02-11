@@ -15,7 +15,7 @@
 import { mountAppShell } from "../ui/appShell";
 import { bindUI } from "../ui/bindings";
 import { ThreeRenderer } from "../renderer/threeRenderer";
-import { makeUnitCubeMesh, type Vec3 } from "../core/mesh";
+import { makeUnitCubeMesh, type Vec3, type Mesh } from "../core/mesh";
 import { TOL } from "../core/tolerances";
 import {
     clearSelection,
@@ -31,6 +31,14 @@ import {
 } from "../core/selection/selection";
 import type { Id } from "../core/ids/ids";
 import type { PickHit } from "../renderer/picking";
+import { CommandManager } from "../core/commands/commandManager";
+import { SetSelectionCommand, type SelectionContext } from "../core/commands/selection/setSelectionCommand";
+import {
+    snapshotSelection,
+    applySelectionSnapshot,
+    selectionSnapshotEquals,
+} from "../core/selection/selection";
+
 
 // --------------------
 // Formatting utilities
@@ -97,6 +105,11 @@ export function startApp(): void {
     const selection = makeSelection();
     let mode: SelectionMode = selection.mode;
 
+    // NEW:
+    const commands = new CommandManager<SelectionContext>();
+    const cmdCtx: SelectionContext = { selection };
+
+
     renderer.setDisplayMode(mode);
     ui.setSelectionText(formatSelectionText(selection, mesh));
 
@@ -114,6 +127,31 @@ export function startApp(): void {
     };
 
     syncSelectionOverlays();
+
+    const isMac = () => navigator.platform.toLowerCase().includes("mac");
+
+    window.addEventListener("keydown", (e) => {
+        const mod = isMac() ? e.metaKey : e.ctrlKey;
+        if (!mod) return;
+
+        const key = e.key.toLowerCase();
+
+        if (key === "z" && !e.shiftKey) {
+            e.preventDefault();
+            commands.undo(cmdCtx);
+            syncSelectionOverlays();
+            syncUI();
+            return;
+        }
+
+        if ((key === "z" && e.shiftKey) || key === "y") {
+            e.preventDefault();
+            commands.redo(cmdCtx);
+            syncSelectionOverlays();
+            syncUI();
+        }
+    });
+
 
     // UI radio buttons -> selection mode change
     ui.onModeChange((m) => {
@@ -135,35 +173,46 @@ export function startApp(): void {
         getMode: () => mode,
 
            onPick: (hit: PickHit, additive: boolean) => {
+               const before = snapshotSelection(selection);
+
+               // Build "after" by applying logic to a temp selection,
+               // then committing via a command. This avoids mutating state
+               // outside the command system.
+               const temp = makeSelection();
+               setSelectionMode(temp, mode);
+               applySelectionSnapshot(temp, before);
+
                // Empty click behavior:
                // - if not additive, clear selection
                // - if additive (shift), keep selection intact
                if (!hit) {
                    if (!additive) {
-                       clearSelection(selection);
-                       syncSelectionOverlays();
-                       syncUI();
+                       clearSelection(temp);
+                   } else {
+                       return; // no change
                    }
-                   return;
-               }
-
-               // Apply pick to selection depending on mode.
-               // NOTE: edge picking in binding.ts uses fixed radii; if you want to use TOL + DPR,
-               // we can pass radii in options and use renderer.getViewportSizePx() there.
-               if (mode === "face") {
-                   if (additive) toggleFace(selection, hit.id);
-                   else replaceFaces(selection, [hit.id]);
-               } else if (mode === "edge") {
-                   if (additive) toggleEdge(selection, hit.id);
-                   else replaceEdges(selection, [hit.id]);
                } else {
-                   if (additive) toggleVertex(selection, hit.id);
-                   else replaceVertices(selection, [hit.id]);
+                   if (mode === "face") {
+                       if (additive) toggleFace(temp, hit.id);
+                       else replaceFaces(temp, [hit.id]);
+                   } else if (mode === "edge") {
+                       if (additive) toggleEdge(temp, hit.id);
+                       else replaceEdges(temp, [hit.id]);
+                   } else {
+                       if (additive) toggleVertex(temp, hit.id);
+                       else replaceVertices(temp, [hit.id]);
+                   }
                }
 
+               const after = snapshotSelection(temp);
+
+               if (selectionSnapshotEquals(before, after)) return;
+
+               commands.execute(cmdCtx, new SetSelectionCommand(before, after));
                syncSelectionOverlays();
                syncUI();
            },
+
 
            onGizmoCaptureChange: (captured) => {
                // Optional hook: could show “dragging…” UI, disable hover, etc.

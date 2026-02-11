@@ -26,7 +26,7 @@ import type { DisplayMode } from "../renderer/overlays";
 import type { ThreeRenderer } from "../renderer/threeRenderer";
 
 import type { Mesh, Vec3 } from "../core/mesh";
-import type { Id } from "../core/ids";
+import type { Id } from "../core/ids/ids";
 
 export type SelectionMode = DisplayMode;
 

@@ -1,12 +1,13 @@
-import type { Id } from "./ids";
+import type { Id } from "./ids/ids";
 
 export type SelectionMode = "face" | "edge" | "vertex";
 
-export type Selection = {
-    mode: SelectionMode;
-    faceIds: Set<Id>;
-    edgeIds: Set<Id>;
-    vertexIds: Set<Id>;
+export type Selection = ReturnType<typeof makeSelection>;
+
+export type SelectionSnapshot = {
+    faceIds: Id[];
+    edgeIds: Id[];
+    vertexIds: Id[];
 };
 
 export function makeSelection(): Selection {
@@ -28,6 +29,51 @@ export function clearSelection(sel: Selection): void {
     sel.edgeIds.clear();
     sel.vertexIds.clear();
 }
+
+// ------------------------
+// Undo/redo snapshot helpers
+// ------------------------
+
+export function snapshotSelection(sel: Selection): SelectionSnapshot {
+    return {
+        faceIds: Array.from(sel.faceIds),
+        edgeIds: Array.from(sel.edgeIds),
+        vertexIds: Array.from(sel.vertexIds),
+    };
+}
+
+export function applySelectionSnapshot(sel: Selection, snap: SelectionSnapshot): void {
+    // IMPORTANT: We intentionally do NOT touch sel.mode here.
+    // Mode switching is owned by the UI flow for now.
+    sel.faceIds.clear();
+    sel.edgeIds.clear();
+    sel.vertexIds.clear();
+
+    for (const id of snap.faceIds) sel.faceIds.add(id);
+    for (const id of snap.edgeIds) sel.edgeIds.add(id);
+    for (const id of snap.vertexIds) sel.vertexIds.add(id);
+}
+
+export function selectionSnapshotEquals(a: SelectionSnapshot, b: SelectionSnapshot): boolean {
+    if (a.faceIds.length !== b.faceIds.length) return false;
+    if (a.edgeIds.length !== b.edgeIds.length) return false;
+    if (a.vertexIds.length !== b.vertexIds.length) return false;
+
+    const af = new Set(a.faceIds);
+    for (const id of b.faceIds) if (!af.has(id)) return false;
+
+    const ae = new Set(a.edgeIds);
+    for (const id of b.edgeIds) if (!ae.has(id)) return false;
+
+    const av = new Set(a.vertexIds);
+    for (const id of b.vertexIds) if (!av.has(id)) return false;
+
+    return true;
+}
+
+// ------------------------
+// Selection operations
+// ------------------------
 
 // Replace selection (no shift)
 export function replaceFaces(sel: Selection, ids: Iterable<Id>): void {
