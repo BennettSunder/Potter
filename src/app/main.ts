@@ -28,17 +28,16 @@ import {
     toggleFace,
     toggleVertex,
     type SelectionMode,
-} from "../core/selection/selection";
-import type { Id } from "../core/ids/ids";
-import type { PickHit } from "../renderer/picking";
-import { CommandManager } from "../core/commands/commandManager";
-import { SetSelectionCommand, type SelectionContext } from "../core/commands/selection/setSelectionCommand";
-import {
     snapshotSelection,
     applySelectionSnapshot,
     selectionSnapshotEquals,
+    inferSelectionModeFromSelection,
 } from "../core/selection/selection";
+import type { Id } from "../core/ids/ids";
+import type { PickHit } from "../renderer/picking";
 
+import { CommandManager } from "../core/commands/commandManager";
+import { SetSelectionCommand, type SelectionContext } from "../core/commands/selection/setSelectionCommand";
 
 // --------------------
 // Formatting utilities
@@ -54,7 +53,7 @@ function fmtVec3(p: Vec3): string {
     return `(${fmtNum(p.x)}, ${fmtNum(p.y)}, ${fmtNum(p.z)})`;
 }
 
-function formatSelectionText( sel: ReturnType<typeof makeSelection>, mesh: Mesh ): string {
+function formatSelectionText(sel: ReturnType<typeof makeSelection>, mesh: Mesh): string {
     if (sel.mode === "face") {
         const n = sel.faceIds.size;
         return n ? `mode: face (${n})` : "mode: face (none)";
@@ -105,10 +104,9 @@ export function startApp(): void {
     const selection = makeSelection();
     let mode: SelectionMode = selection.mode;
 
-    // NEW:
+    // Undo/redo manager (selection-only for now)
     const commands = new CommandManager<SelectionContext>();
     const cmdCtx: SelectionContext = { selection };
-
 
     renderer.setDisplayMode(mode);
     ui.setSelectionText(formatSelectionText(selection, mesh));
@@ -126,8 +124,24 @@ export function startApp(): void {
         renderer.setGizmoActive(anySelected);
     };
 
+    const applyModeFromSelectionIfNeeded = () => {
+        const inferred = inferSelectionModeFromSelection(selection);
+        if (!inferred) return; // keep current mode when nothing selected
+        if (inferred === mode) return;
+
+        mode = inferred;
+
+        // IMPORTANT: do NOT call setSelectionMode here (it clears selection).
+        // We only change how we interpret/display picks + how overlays render.
+        renderer.setDisplayMode(mode);
+
+        // Requires ui.setMode(mode) to be added to the AppShell API
+        ui.setMode(mode);
+    };
+
     syncSelectionOverlays();
 
+    // Keyboard shortcuts: selection undo/redo
     const isMac = () => navigator.platform.toLowerCase().includes("mac");
 
     window.addEventListener("keydown", (e) => {
@@ -139,6 +153,7 @@ export function startApp(): void {
         if (key === "z" && !e.shiftKey) {
             e.preventDefault();
             commands.undo(cmdCtx);
+            applyModeFromSelectionIfNeeded();
             syncSelectionOverlays();
             syncUI();
             return;
@@ -147,11 +162,11 @@ export function startApp(): void {
         if ((key === "z" && e.shiftKey) || key === "y") {
             e.preventDefault();
             commands.redo(cmdCtx);
+            applyModeFromSelectionIfNeeded();
             syncSelectionOverlays();
             syncUI();
         }
     });
-
 
     // UI radio buttons -> selection mode change
     ui.onModeChange((m) => {
@@ -175,44 +190,43 @@ export function startApp(): void {
            onPick: (hit: PickHit, additive: boolean) => {
                const before = snapshotSelection(selection);
 
-               // Build "after" by applying logic to a temp selection,
-               // then committing via a command. This avoids mutating state
-               // outside the command system.
+               // Compute "after" on a temp selection to keep mutations inside Commands
                const temp = makeSelection();
-               setSelectionMode(temp, mode);
-               applySelectionSnapshot(temp, before);
+               setSelectionMode(temp, mode); // clears temp (fine)
+    applySelectionSnapshot(temp, before);
 
-               // Empty click behavior:
-               // - if not additive, clear selection
-               // - if additive (shift), keep selection intact
-               if (!hit) {
-                   if (!additive) {
-                       clearSelection(temp);
-                   } else {
-                       return; // no change
-                   }
-               } else {
-                   if (mode === "face") {
-                       if (additive) toggleFace(temp, hit.id);
-                       else replaceFaces(temp, [hit.id]);
-                   } else if (mode === "edge") {
-                       if (additive) toggleEdge(temp, hit.id);
-                       else replaceEdges(temp, [hit.id]);
-                   } else {
-                       if (additive) toggleVertex(temp, hit.id);
-                       else replaceVertices(temp, [hit.id]);
-                   }
-               }
+    // Empty click behavior:
+    // - if not additive, clear selection
+    // - if additive (shift), keep selection intact
+    if (!hit) {
+        if (!additive) {
+            clearSelection(temp);
+        } else {
+            return; // no change
+        }
+    } else {
+        if (mode === "face") {
+            if (additive) toggleFace(temp, hit.id);
+            else replaceFaces(temp, [hit.id]);
+        } else if (mode === "edge") {
+            if (additive) toggleEdge(temp, hit.id);
+            else replaceEdges(temp, [hit.id]);
+        } else {
+            if (additive) toggleVertex(temp, hit.id);
+            else replaceVertices(temp, [hit.id]);
+        }
+    }
 
-               const after = snapshotSelection(temp);
+    const after = snapshotSelection(temp);
+    if (selectionSnapshotEquals(before, after)) return;
 
-               if (selectionSnapshotEquals(before, after)) return;
+    commands.execute(cmdCtx, new SetSelectionCommand(before, after));
 
-               commands.execute(cmdCtx, new SetSelectionCommand(before, after));
+               // If selection changed categories via undo/redo history, we keep mode stable here.
+               // Mode swapping is handled on undo/redo only (per requirement).
                syncSelectionOverlays();
                syncUI();
            },
-
 
            onGizmoCaptureChange: (captured) => {
                // Optional hook: could show “dragging…” UI, disable hover, etc.

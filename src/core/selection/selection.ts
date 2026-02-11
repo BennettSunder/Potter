@@ -118,3 +118,11 @@ export function toggleVertex(sel: Selection, id: Id): void {
     sel.faceIds.clear();
     sel.edgeIds.clear();
 }
+
+export function inferSelectionModeFromSelection(sel: Selection): SelectionMode | null {
+    if (sel.faceIds.size > 0) return "face";
+    if (sel.edgeIds.size > 0) return "edge";
+    if (sel.vertexIds.size > 0) return "vertex";
+    return null;
+}
+

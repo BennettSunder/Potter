@@ -178,45 +178,46 @@ export function mountAppShell(root: HTMLElement): {
     canvas: HTMLCanvasElement;
     setSelectionText: (t: string) => void;
     onModeChange: (cb: (mode: SelectionMode) => void) => void;
+    setMode: (mode: SelectionMode) => void;
 } {
     ensureAppShellStyles();
 
     root.innerHTML = `
     <div class="potter-root">
-        <div class="potter-panel">
-            <strong>Potter</strong>
+    <div class="potter-panel">
+    <strong>Potter</strong>
 
-            <div class="potter-section">
-                <!-- <div class="potter-label">Select mode</div> -->
-            </div>
+    <div class="potter-section">
+    <!-- <div class="potter-label">Select mode</div> -->
+    </div>
 
-            <hr class="potter-divider" />
+    <hr class="potter-divider" />
 
-            <div class="potter-selection-title">Selection:</div>
-                <div id="selectionText" class="potter-selection-text">(none)</div>
-            </div>
+    <div class="potter-selection-title">Selection:</div>
+    <div id="selectionText" class="potter-selection-text">(none)</div>
+    </div>
 
-            <div class="potter-tool-row">
-                <label class="potter-tool" title="Select vertices" aria-label="Select vertices">
-                    <input type="radio" name="selMode" value="vertex" />
-                    <span class="potter-tool-btn">${iconVertexDot()}</span>
-                </label>
+    <div class="potter-tool-row">
+    <label class="potter-tool" title="Select vertices" aria-label="Select vertices">
+    <input type="radio" name="selMode" value="vertex" />
+    <span class="potter-tool-btn">${iconVertexDot()}</span>
+    </label>
 
-                <label class="potter-tool" title="Select edges" aria-label="Select edges">
-                    <input type="radio" name="selMode" value="edge" />
-                    <span class="potter-tool-btn">${iconEdgeLine()}</span>
-                </label>
+    <label class="potter-tool" title="Select edges" aria-label="Select edges">
+    <input type="radio" name="selMode" value="edge" />
+    <span class="potter-tool-btn">${iconEdgeLine()}</span>
+    </label>
 
-                <label class="potter-tool" title="Select faces" aria-label="Select faces">
-                    <input type="radio" name="selMode" value="face" checked />
-                    <span class="potter-tool-btn">${iconFaceParallelogram()}</span>
-                </label>
-            </div>
+    <label class="potter-tool" title="Select faces" aria-label="Select faces">
+    <input type="radio" name="selMode" value="face" checked />
+    <span class="potter-tool-btn">${iconFaceParallelogram()}</span>
+    </label>
+    </div>
 
-            <div class="potter-viewport-wrap">
-                <canvas id="viewport" class="potter-viewport"></canvas>
-            </div>
-        </div>
+    <div class="potter-viewport-wrap">
+    <canvas id="viewport" class="potter-viewport"></canvas>
+    </div>
+    </div>
     </div>
     `;
 
@@ -230,9 +231,18 @@ export function mountAppShell(root: HTMLElement): {
         root.querySelectorAll<HTMLInputElement>('input[name="selMode"]'),
     );
 
+    const setMode = (mode: SelectionMode) => {
+        const r = radios.find((x) => x.value === mode);
+        if (!r) return;
+        // Setting checked programmatically does NOT trigger "change" in browsers,
+        // which avoids event loops with main.ts.
+        r.checked = true;
+    };
+
     return {
         canvas,
         setSelectionText: (t: string) => (selectionEl.textContent = t),
+        setMode,
         onModeChange: (cb) => {
             const fire = () => {
                 const checked = radios.find((r) => r.checked);
@@ -247,6 +257,5 @@ export function mountAppShell(root: HTMLElement): {
 
                 fire();
         },
-
     };
 }

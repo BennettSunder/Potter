@@ -1,7 +1,6 @@
 // src/renderer/picking.ts
 import * as THREE from "three";
 import type { Id } from "../core/ids/ids";
-import type { Id } from "../core/ids/ids";
 import type { Face } from "../core/mesh";
 
 export type PickHit =
