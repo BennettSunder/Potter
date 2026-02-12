@@ -15,18 +15,20 @@
 
 import * as THREE from "three";
 import type { Mesh } from "../core/mesh";
-import type { Id } from "../core/ids";
+import type { Id } from "../core/ids/ids";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { SelectionMode } from "../core/selection/selection";
+
 
 import {
   type PickHit,
-  pickFace,
-  pickEdge,
-  pickVertex,
-  buildEdgeKeys,
+  // pickFace,
+  // pickEdge,
+  // pickVertex,
+  // buildEdgeKeys,
+  // buildEdgeKeysFromFaces,
   getViewportSizePx,
   getCanvasRectCssPx,
-  buildEdgeKeysFromFaces,
 } from "./picking";
 
 import {
@@ -97,13 +99,20 @@ export class ThreeRenderer {
   //   vertexId -> render position index
   private vertIndexById = new Map<Id, number>();
 
+
+  private vertexPoints: THREE.Points | null = null;
+  private edgeLines: THREE.LineSegments | null = null;
+
+  private indexToVertexId: Id[] = [];
+  private segmentToEdgeId: Id[] = [];
+
   // --------------------------
   // Cached edges for edge mode
   // --------------------------
   //
   // Unique undirected edges as "aId|bId"
   // Used by screen-space edge picking and edge selection overlay.
-  private edgeKeys: string[] = [];
+  // private edgeKeys: string[] = [];
 
   // ----------------
   // Overlay subsystem
@@ -188,6 +197,16 @@ export class ThreeRenderer {
     setDisplayMode(mode, this.overlayMats, this.overlayObjs);
   }
 
+
+  /**
+   * Exposes the camera to allow for other parts of the app
+   * to use it and its properties
+   */
+  getCamera() {
+    return this.camera;
+  }
+
+
   /**
    * Turn gizmo visibility on/off.
    * Typical usage: enable when something is selected.
@@ -270,11 +289,10 @@ export class ThreeRenderer {
     // 2) Index buffer (tris)
     // -----------------------
     //
-    // We triangulate each polygon face using a simple fan:
-    //  (v0, v1, v2), (v0, v2, v3), (v0, v3, v4), ...
+    // Triangulate polygon faces with a fan:
+    //  (v0, v1, v2), (v0, v2, v3), ...
     //
-    // This assumes faces are convex + consistently wound (fine for cube / early ops).
-    // Later, if you need concave ngons, you can swap triangulation here.
+    // Assumes convex + consistent winding (fine for cube / early ops).
 
     this.triToFaceId = [];
     this.triIndexByFaceId.clear();
@@ -286,8 +304,18 @@ export class ThreeRenderer {
     for (const f of faces) {
       if (f.verts.length < 3) continue;
 
-      // Convert face vertex IDs -> render indices once
-      const vidx = f.verts.map((vId) => mesh.getVertexIndex(vId));
+      // Convert face vertex IDs -> render indices (IMPORTANT: use renderer's map)
+      const vidx: number[] = [];
+      for (const vId of f.verts) {
+        const ri = this.vertIndexById.get(vId);
+        if (ri === undefined) {
+          // Face references a missing vertex (shouldn't happen in MVP); skip this face
+          vidx.length = 0;
+          break;
+        }
+        vidx.push(ri);
+      }
+      if (vidx.length < 3) continue;
 
       const faceTriIndices: number[] = [];
 
@@ -322,15 +350,26 @@ export class ThreeRenderer {
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setIndex(new THREE.BufferAttribute(idxTyped, 1));
     geo.computeVertexNormals();
-
-    // Edge cache (unique undirected edges) for edge overlays + edge picking
-    this.edgeKeys = buildEdgeKeysFromFaces(mesh.getFaces());
-
+    geo.computeBoundingSphere(); // helps raycasting + culling
 
     // -----------------------------
     // 3) Tear down old render state
     // -----------------------------
     clearSelectionOverlays(this.scene, this.overlayObjs);
+
+    // Dispose old pick helpers (if present)
+    if (this.vertexPoints) {
+      this.scene.remove(this.vertexPoints);
+      this.vertexPoints.geometry.dispose();
+      (this.vertexPoints.material as THREE.Material).dispose();
+      this.vertexPoints = null;
+    }
+    if (this.edgeLines) {
+      this.scene.remove(this.edgeLines);
+      this.edgeLines.geometry.dispose();
+      (this.edgeLines.material as THREE.Material).dispose();
+      this.edgeLines = null;
+    }
 
     if (this.backfaceObj) {
       this.scene.remove(this.backfaceObj);
@@ -373,69 +412,201 @@ export class ThreeRenderer {
     // Reattach gizmo if it's active
     if (this.gizmoActive) this.gizmos.attach(this.meshObj);
 
-    // Default visuals
-    this.setDisplayMode("face");
+    // IMPORTANT: do NOT force display mode here.
+    // setMesh() can be called during drag/preview; forcing "face" breaks edge/vertex mode.
+    // Whatever code manages mode (main.ts) should call setDisplayMode(mode) once.
+
+    // Build pick helpers AFTER mesh objects are replaced
+    this.buildVertexPoints(mesh);
+    this.buildEdgeLines(mesh);
   }
+
 
   // -----------------------
   // Picking (selection input)
   // -----------------------
 
   /** Face picking: raycast -> triangle index -> faceId via triToFaceId */
-  pick(ndcX: number, ndcY: number): PickHit {
-    return pickFace(
-      {
-        renderer: this.renderer,
-        camera: this.camera,
-        raycaster: this.raycaster,
-        meshObj: this.meshObj,
-        triToFaceId: this.triToFaceId,
-        indexToVertId: this.indexToVertId,
-        vertIndexById: this.vertIndexById,
-        edgeKeys: this.edgeKeys,
-      },
-      ndcX,
-      ndcY
-    );
+  /** Unified picking: vertex/edge via helper objects, face via main mesh triangles */
+  pick(ndcX: number, ndcY: number, mode: SelectionMode): PickHit | null {
+    this.raycaster.setFromCamera({ x: ndcX, y: ndcY } as any, this.camera);
+
+    // ---------- Vertex ----------
+    if (mode === "vertex" && this.vertexPoints) {
+      // threshold is in WORLD units for Points raycast
+      this.raycaster.params.Points = this.raycaster.params.Points ?? { threshold: 0.1 };
+      this.raycaster.params.Points.threshold = 0.1;
+
+      const hits = this.raycaster.intersectObject(this.vertexPoints, false);
+      const h = hits[0];
+      if (h) {
+        const idx = (h as any).index as number | undefined;
+        if (idx != null) {
+          const vid = this.indexToVertexId[idx];
+          if (vid) return { type: "vertex", id: vid, depth: h.distance, worldPos: h.point };
+        }
+      }
+      return null;
+    }
+
+    // ---------- Edge ----------
+    if (mode === "edge" && this.edgeLines) {
+      // threshold is in WORLD units for Line raycast
+      this.raycaster.params.Line = this.raycaster.params.Line ?? { threshold: 0.1 };
+      this.raycaster.params.Line.threshold = 0.1;
+
+      const hits = this.raycaster.intersectObject(this.edgeLines, false);
+      const h = hits[0];
+      if (h) {
+        // For LineSegments, Three returns .index as a vertex index into the line geometry
+        const lineVertIndex = (h as any).index as number | undefined;
+        if (lineVertIndex != null) {
+          const segmentIndex = Math.floor(lineVertIndex / 2);
+          const eid = this.segmentToEdgeId[segmentIndex];
+          if (eid) return { type: "edge", id: eid, depth: h.distance, worldPos: h.point };
+        }
+      }
+      return null;
+    }
+
+    // ---------- Face ----------
+    if (!this.meshObj) return null;
+
+    const hits = this.raycaster.intersectObject(this.meshObj, false);
+    const h = hits[0];
+    if (!h) return null;
+
+    // Three provides triangle index for BufferGeometry meshes
+    const triIndex = (h as any).faceIndex as number | undefined;
+    if (triIndex == null) return null;
+
+    const faceId = this.triToFaceId[triIndex];
+    if (!faceId) return null;
+
+    return { type: "face", id: faceId, depth: h.distance, worldPos: h.point };
   }
 
-  /** Edge picking: screen-space distance-to-segment against cached edges */
-  pickLine(ndcX: number, ndcY: number, radiusPx: number): PickHit {
-    return pickEdge(
-      {
-        renderer: this.renderer,
-        camera: this.camera,
-        raycaster: this.raycaster,
-        meshObj: this.meshObj,
-        triToFaceId: this.triToFaceId,
-        indexToVertId: this.indexToVertId,
-        vertIndexById: this.vertIndexById,
-        edgeKeys: this.edgeKeys,
-      },
-      ndcX,
-      ndcY,
-      radiusPx
-    );
+
+
+  // /** Edge picking: screen-space distance-to-segment against cached edges */
+  // pickLine(ndcX: number, ndcY: number, radiusPx: number): PickHit {
+  //   return pickEdge(
+  //     {
+  //       renderer: this.renderer,
+  //       camera: this.camera,
+  //       raycaster: this.raycaster,
+  //       meshObj: this.meshObj,
+  //       triToFaceId: this.triToFaceId,
+  //       indexToVertId: this.indexToVertId,
+  //       vertIndexById: this.vertIndexById,
+  //       edgeKeys: this.edgeKeys,
+  //     },
+  //     ndcX,
+  //     ndcY,
+  //     radiusPx
+  //   );
+  // }
+
+  // /** Vertex picking: screen-space nearest point within radius */
+  // pickVertex(ndcX: number, ndcY: number, radiusPx: number): PickHit {
+  //   return pickVertex(
+  //     {
+  //       renderer: this.renderer,
+  //       camera: this.camera,
+  //       raycaster: this.raycaster,
+  //       meshObj: this.meshObj,
+  //       triToFaceId: this.triToFaceId,
+  //       indexToVertId: this.indexToVertId,
+  //       vertIndexById: this.vertIndexById,
+  //       edgeKeys: this.edgeKeys,
+  //     },
+  //     ndcX,
+  //     ndcY,
+  //     radiusPx
+  //   );
+  // }
+
+
+
+  private buildVertexPoints(mesh: Mesh) {
+    const verts = mesh.getVertices();
+
+    const pos = new Float32Array(verts.length * 3);
+    this.indexToVertexId = new Array<Id>(verts.length);
+
+    for (let i = 0; i < verts.length; i++) {
+      const v = verts[i]!;
+      pos[i * 3 + 0] = v.position.x;
+      pos[i * 3 + 1] = v.position.y;
+      pos[i * 3 + 2] = v.position.z;
+      this.indexToVertexId[i] = v.id;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+
+    const mat = new THREE.PointsMaterial({
+      size: 8,              // screen-space-ish; tweak
+      sizeAttenuation: false,
+      depthTest: true,
+      transparent: true,
+      opacity: 0.0,         // invisible but still raycastable
+    });
+
+    if (this.vertexPoints) {
+      this.scene.remove(this.vertexPoints);
+      this.vertexPoints.geometry.dispose();
+      (this.vertexPoints.material as THREE.Material).dispose();
+    }
+
+    this.vertexPoints = new THREE.Points(geo, mat);
+    this.vertexPoints.frustumCulled = false;
+    this.scene.add(this.vertexPoints);
   }
 
-  /** Vertex picking: screen-space nearest point within radius */
-  pickVertex(ndcX: number, ndcY: number, radiusPx: number): PickHit {
-    return pickVertex(
-      {
-        renderer: this.renderer,
-        camera: this.camera,
-        raycaster: this.raycaster,
-        meshObj: this.meshObj,
-        triToFaceId: this.triToFaceId,
-        indexToVertId: this.indexToVertId,
-        vertIndexById: this.vertIndexById,
-        edgeKeys: this.edgeKeys,
-      },
-      ndcX,
-      ndcY,
-      radiusPx
-    );
+  private buildEdgeLines(mesh: Mesh) {
+    const edges = mesh.getEdges();
+
+    const pos = new Float32Array(edges.length * 2 * 3);
+    this.segmentToEdgeId = new Array<Id>(edges.length);
+
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i]!;
+      const a = mesh.getVertexPosition(e.a);
+      const b = mesh.getVertexPosition(e.b);
+
+      // segment i occupies vertices (2*i) and (2*i+1)
+      const base = i * 6;
+      pos[base + 0] = a.x;
+      pos[base + 1] = a.y;
+      pos[base + 2] = a.z;
+      pos[base + 3] = b.x;
+      pos[base + 4] = b.y;
+      pos[base + 5] = b.z;
+
+      this.segmentToEdgeId[i] = e.id;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+
+    const mat = new THREE.LineBasicMaterial({
+      transparent: true,
+      opacity: 0.0,   // invisible but raycastable
+      depthTest: true,
+    });
+
+    if (this.edgeLines) {
+      this.scene.remove(this.edgeLines);
+      this.edgeLines.geometry.dispose();
+      (this.edgeLines.material as THREE.Material).dispose();
+    }
+
+    this.edgeLines = new THREE.LineSegments(geo, mat);
+    this.edgeLines.frustumCulled = false;
+    this.scene.add(this.edgeLines);
   }
+
 
   // ---------------------------------------
   // Selection visualization (highlighting)
@@ -591,3 +762,4 @@ export class ThreeRenderer {
     sync(this.overlayObjs.selectedEdgesObj);
   }
 }
+

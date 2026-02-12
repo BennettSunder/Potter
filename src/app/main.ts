@@ -16,7 +16,6 @@ import { mountAppShell } from "../ui/appShell";
 import { bindUI } from "../ui/bindings";
 import { ThreeRenderer } from "../renderer/threeRenderer";
 import { makeUnitCubeMesh, type Vec3, type Mesh } from "../core/mesh";
-import { TOL } from "../core/tolerances";
 import {
     clearSelection,
     makeSelection,
@@ -33,11 +32,11 @@ import {
     selectionSnapshotEquals,
     inferSelectionModeFromSelection,
 } from "../core/selection/selection";
-import type { Id } from "../core/ids/ids";
 import type { PickHit } from "../renderer/picking";
 
 import { CommandManager } from "../core/commands/commandManager";
-import { SetSelectionCommand, type SelectionContext } from "../core/commands/selection/setSelectionCommand";
+import { SetSelectionCommand, type SelectionContext } from "../core/commands/selectionCommands/setSelectionCommand";
+import { GrabController } from "./grabController";
 
 // --------------------
 // Formatting utilities
@@ -96,6 +95,9 @@ export function startApp(): void {
     const ui = mountAppShell(root);
     const renderer = new ThreeRenderer(ui.canvas);
 
+    // Use the same canvas the renderer is using
+    const canvas = ui.canvas;
+
     // Core mesh (polygons); renderer triangulates for display/picking
     const mesh = makeUnitCubeMesh();
     renderer.setMesh(mesh);
@@ -124,6 +126,14 @@ export function startApp(): void {
         renderer.setGizmoActive(anySelected);
     };
 
+    const syncMeshToRenderer = () => {
+        // Rebuild render buffers after mesh edits
+        renderer.setMesh(mesh);
+        // Keep selection overlays consistent after rebuild
+        syncSelectionOverlays();
+        syncUI();
+    };
+
     const applyModeFromSelectionIfNeeded = () => {
         const inferred = inferSelectionModeFromSelection(selection);
         if (!inferred) return; // keep current mode when nothing selected
@@ -141,99 +151,190 @@ export function startApp(): void {
 
     syncSelectionOverlays();
 
-    // Keyboard shortcuts: selection undo/redo
-    const isMac = () => navigator.platform.toLowerCase().includes("mac");
+    // --------------------
+    // Grab (G) controller
+    // --------------------
 
-    window.addEventListener("keydown", (e) => {
-        const mod = isMac() ? e.metaKey : e.ctrlKey;
-        if (!mod) return;
+    // GrabController needs a camera. Prefer an explicit getter on the renderer,
+    // but allow fallback to a public field if that's what you have today.
+    const camera =
+    (renderer as any).getCamera?.() ??
+    (renderer as any).camera ??
+    undefined;
 
-        const key = e.key.toLowerCase();
-
-        if (key === "z" && !e.shiftKey) {
-            e.preventDefault();
-            commands.undo(cmdCtx);
-            applyModeFromSelectionIfNeeded();
-            syncSelectionOverlays();
-            syncUI();
-            return;
-        }
-
-        if ((key === "z" && e.shiftKey) || key === "y") {
-            e.preventDefault();
-            commands.redo(cmdCtx);
-            applyModeFromSelectionIfNeeded();
-            syncSelectionOverlays();
-            syncUI();
-        }
-    });
-
-    // UI radio buttons -> selection mode change
-    ui.onModeChange((m) => {
-        mode = m;
-        setSelectionMode(selection, m);
-
-        renderer.setDisplayMode(m);
-
-        // Core clears selection on mode change; reflect it.
-        syncSelectionOverlays();
-        syncUI();
-    });
-
-    // Pointer picking + gizmo capture lives in ui/binding.ts now
-    bindUI({
-        shell: ui,
-        renderer,
+    const grab = camera
+    ? new GrabController(
         mesh,
-        getMode: () => mode,
+        selection,
+        commands,
+        cmdCtx,
+        camera,
+        () => canvas,
+                         syncMeshToRenderer,
+    )
+    : null;
 
-           onPick: (hit: PickHit, additive: boolean) => {
-               const before = snapshotSelection(selection);
+    // Track mouse position so pressing G can start immediately (grabController reads these)
+    window.addEventListener("pointermove", (e) => {
+        (window as any).__potterMouseX = e.clientX;
+        (window as any).__potterMouseY = e.clientY;
 
-               // Compute "after" on a temp selection to keep mutations inside Commands
-               const temp = makeSelection();
-               setSelectionMode(temp, mode); // clears temp (fine)
-    applySelectionSnapshot(temp, before);
-
-    // Empty click behavior:
-    // - if not additive, clear selection
-    // - if additive (shift), keep selection intact
-    if (!hit) {
-        if (!additive) {
-            clearSelection(temp);
-        } else {
-            return; // no change
+        if (grab?.isActive()) {
+            grab.onPointerMove();
         }
-    } else {
-        if (mode === "face") {
-            if (additive) toggleFace(temp, hit.id);
-            else replaceFaces(temp, [hit.id]);
-        } else if (mode === "edge") {
-            if (additive) toggleEdge(temp, hit.id);
-            else replaceEdges(temp, [hit.id]);
-        } else {
-            if (additive) toggleVertex(temp, hit.id);
-            else replaceVertices(temp, [hit.id]);
-        }
-    }
-
-    const after = snapshotSelection(temp);
-    if (selectionSnapshotEquals(before, after)) return;
-
-    commands.execute(cmdCtx, new SetSelectionCommand(before, after));
-
-               // If selection changed categories via undo/redo history, we keep mode stable here.
-               // Mode swapping is handled on undo/redo only (per requirement).
-               syncSelectionOverlays();
-               syncUI();
-           },
-
-           onGizmoCaptureChange: (captured) => {
-               // Optional hook: could show “dragging…” UI, disable hover, etc.
-               // For now, no-op.
-               void captured;
-           },
     });
 
-    renderer.start();
+    // Also track mouse position on pointer down (helps “click then press G” without moving mouse)
+    window.addEventListener("pointerdown", (e) => {
+        (window as any).__potterMouseX = e.clientX;
+        (window as any).__potterMouseY = e.clientY;
+
+        if (!grab?.isActive()) return;
+
+        // Left click commits, right click cancels
+        if (e.button === 0) {
+            e.preventDefault();
+            grab.commit();
+        } else if (e.button === 2) {
+            e.preventDefault();
+            grab.cancel();
+        }
+    });
+
+    // Prevent context menu while grabbing (right click = cancel)
+    window.addEventListener("contextmenu", (e) => {
+        if (grab?.isActive()) e.preventDefault();
+    });
+
+        // --------------------
+        // Keyboard shortcuts
+        // --------------------
+
+        const isMac = () => navigator.platform.toLowerCase().includes("mac");
+
+        window.addEventListener("keydown", (e) => {
+            // If grab mode is active, Esc/Enter should work regardless of modifiers.
+            if (grab?.isActive()) {
+                const k = e.key.toLowerCase();
+                if (k === "escape") {
+                    e.preventDefault();
+                    grab.cancel();
+                    return;
+                }
+                if (k === "enter") {
+                    e.preventDefault();
+                    grab.commit();
+                    return;
+                }
+            }
+
+            // Start grab with G (when there is a selection)
+            if ((e.key === "g" || e.key === "G") && grab) {
+                // Avoid typing 'g' into text fields
+                const tag = (e.target as HTMLElement | null)?.tagName ?? "";
+                if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+                // If your renderer exposes a helper to update camera/controls, call it here.
+                (renderer as any).forceCameraUpdate?.();
+
+                e.preventDefault();
+                grab.beginFromKey();
+                return;
+            }
+
+            // Selection undo/redo
+            const mod = isMac() ? e.metaKey : e.ctrlKey;
+            if (!mod) return;
+
+            const key = e.key.toLowerCase();
+
+            if (key === "z" && !e.shiftKey) {
+                e.preventDefault();
+                commands.undo(cmdCtx);
+                applyModeFromSelectionIfNeeded();
+                syncSelectionOverlays();
+                syncUI();
+                return;
+            }
+
+            if ((key === "z" && e.shiftKey) || key === "y") {
+                e.preventDefault();
+                commands.redo(cmdCtx);
+                applyModeFromSelectionIfNeeded();
+                syncSelectionOverlays();
+                syncUI();
+            }
+        });
+
+        // UI radio buttons -> selection mode change
+        ui.onModeChange((m) => {
+            mode = m;
+            setSelectionMode(selection, m);
+
+            renderer.setDisplayMode(m);
+
+            // Core clears selection on mode change; reflect it.
+            syncSelectionOverlays();
+            syncUI();
+        });
+
+        // Pointer picking + gizmo capture lives in ui/binding.ts now
+        bindUI({
+            shell: ui,
+            renderer,
+            mesh,
+            getMode: () => mode,
+
+               onPick: (hit: PickHit | null, additive: boolean) => {
+                   // Don't allow selection changes while actively grabbing
+                   if (grab?.isActive()) return;
+
+                   const before = snapshotSelection(selection);
+
+                   // Compute "after" on a temp selection to keep mutations inside Commands
+                   const temp = makeSelection();
+                   setSelectionMode(temp, mode); // clears temp (fine)
+        applySelectionSnapshot(temp, before);
+
+        // Empty click behavior:
+        // - if not additive, clear selection
+        // - if additive (shift), keep selection intact
+        if (!hit) {
+            if (!additive) {
+                clearSelection(temp);
+            } else {
+                return; // no change
+            }
+        } else {
+            if (mode === "face") {
+                if (additive) toggleFace(temp, hit.id);
+                else replaceFaces(temp, [hit.id]);
+            } else if (mode === "edge") {
+                if (additive) toggleEdge(temp, hit.id);
+                else replaceEdges(temp, [hit.id]);
+            } else {
+                if (additive) toggleVertex(temp, hit.id);
+                else replaceVertices(temp, [hit.id]);
+            }
+        }
+
+        const after = snapshotSelection(temp);
+        if (selectionSnapshotEquals(before, after)) return;
+
+        commands.execute(cmdCtx, new SetSelectionCommand(before, after));
+
+                   // If selection changed categories via undo/redo history, we keep mode stable here.
+                   // Mode swapping is handled on undo/redo only (per requirement).
+                   syncSelectionOverlays();
+                   syncUI();
+               },
+
+               onGizmoCaptureChange: (captured) => {
+                   // Optional hook: could show “dragging…” UI, disable hover, etc.
+                   // For now, no-op.
+                   void captured;
+               },
+        });
+
+        renderer.start();
 }

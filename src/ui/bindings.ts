@@ -1,4 +1,4 @@
-// src/ui/binding.ts
+// src/ui/bindings.ts
 //
 // UI Binding = “glue code” between:
 // - AppShell (DOM controls / radio buttons / status text)
@@ -31,7 +31,6 @@ import type { Id } from "../core/ids/ids";
 export type SelectionMode = DisplayMode;
 
 // The minimal interface we need from your app shell.
-// (This matches what we’ve been building: canvas + selection text + mode change hook.)
 export type AppShellAPI = {
     canvas: HTMLCanvasElement;
 
@@ -54,7 +53,6 @@ export type BindUIOptions = {
 
     /**
      * Ask the app “what selection mode are we in right now?”
-     * (AppShell will usually be the source of truth; your app can store it too.)
      */
     getMode: () => SelectionMode;
 
@@ -63,9 +61,9 @@ export type BindUIOptions = {
      * we convert mouse coords -> NDC, run picking, and report the result.
      *
      * additive = true when shift is held (multi-select behavior).
-     * Your app decides how to apply this to SelectionModel.
+     * hit can be null for empty clicks.
      */
-    onPick: (hit: PickHit, additive: boolean) => void;
+    onPick: (hit: PickHit | null, additive: boolean) => void;
 
     /**
      * Optional: provide currently selected vertex IDs so we can display their positions.
@@ -82,7 +80,6 @@ export type BindUIOptions = {
 
 function fmtNum(n: number): string {
     const v = Math.abs(n) < 1e-9 ? 0 : n; // avoid "-0"
-    // Keep it simple and readable; change to toFixed(2) if you prefer.
     return String(v);
 }
 
@@ -117,7 +114,7 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
 
     /**
      * Convert a PointerEvent to NDC (Normalized Device Coordinates):
-     * -1..+1 in X and Y, suitable for Three.js raycasting and our screen-space picking.
+     * -1..+1 in X and Y, suitable for Three.js raycasting and our picking.
      */
     const eventToNdc = (ev: PointerEvent): { ndcX: number; ndcY: number } => {
         const rect = renderer.getCanvasRectCssPx();
@@ -134,55 +131,37 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     };
 
     /**
-     * Calls the correct picking routine based on mode.
-     * - face: raycast against mesh triangles, mapped back to faceId
-     * - edge: screen-space point-to-segment within radius
-     * - vertex: screen-space point-to-point within radius
+     * Unified picking call.
+     * Renderer decides how to pick based on mode.
      */
-    const runPick = (ndcX: number, ndcY: number): PickHit => {
+    const runPick = (ndcX: number, ndcY: number): PickHit | null => {
         const mode = getMode();
-
-        // These radii are “UI feel” values. If you want, we can centralize them in tolerances.ts.
-        const EDGE_RADIUS_PX = 8;
-        const VERT_RADIUS_PX = 10;
-
-        if (mode === "face") return renderer.pick(ndcX, ndcY);
-        if (mode === "edge") return renderer.pickLine(ndcX, ndcY, EDGE_RADIUS_PX);
-        return renderer.pickVertex(ndcX, ndcY, VERT_RADIUS_PX);
+        return renderer.pick(ndcX, ndcY, mode);
     };
 
     // -------------------------
     // Mode change -> renderer UI
     // -------------------------
 
-    // When the user switches selection mode, update renderer overlay visibility.
     shell.onModeChange((mode) => {
         renderer.setDisplayMode(mode);
-        // Note: your app may also want to clear selection or keep it.
-        // We do NOT decide that here.
     });
 
     // -------------------------
     // UI status text helpers
     // -------------------------
 
-    /**
-     * Update the status text after an action, using the mode + selection state.
-     * In vertex mode, we prefer to show selected vertex positions if available.
-     */
     const updateStatusText = (hit: PickHit | null) => {
         const mode = getMode();
 
         if (mode !== "vertex") {
-            // Keep it compact for face/edge modes
+            // Compact for face/edge modes
             if (!hit) shell.setSelectionText("(none)");
             else shell.setSelectionText(`${hit.type} ${String(hit.id)}`);
             return;
         }
 
         // Vertex mode: show positions.
-        // Prefer showing all selected vertex positions (if app provides them),
-        // otherwise show just the picked vertex position.
         const ids = getSelectedVertexIds ? Array.from(getSelectedVertexIds()) : null;
 
         if (ids && ids.length > 0) {
@@ -226,7 +205,6 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         // Only left button for selection/drag tools
         if (ev.button !== 0) return;
 
-        // Important: avoid selecting while orbit controls might be using middle button, etc.
         ev.preventDefault();
 
         const { ndcX, ndcY } = eventToNdc(ev);
@@ -240,13 +218,13 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
             return;
         }
 
-        // Otherwise: do normal picking.
+        // Otherwise: do normal picking (can be null)
         const hit = runPick(ndcX, ndcY);
         const additive = ev.shiftKey;
 
         onPick(hit, additive);
 
-        // UI feedback: show IDs for face/edge, positions for vertex mode.
+        // UI feedback
         updateStatusText(hit);
     };
 
@@ -275,7 +253,7 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         try {
             canvas.releasePointerCapture(ev.pointerId);
         } catch {
-            // no-op: can throw if capture wasn't set; safe to ignore
+            // can throw if capture wasn't set; ignore
         }
     };
 
@@ -284,10 +262,6 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
     canvas.addEventListener("pointerleave", endDrag);
-
-    // -------------------------
-    // Dispose (hot reload safety)
-    // -------------------------
 
     const dispose = () => {
         canvas.removeEventListener("pointerdown", onPointerDown);
