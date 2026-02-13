@@ -3,7 +3,7 @@ import * as THREE from "three";
 import type { Mesh, Vec3 } from "../core/mesh";
 import type { Id } from "../core/ids/ids";
 import type { CommandManager } from "../core/commands/commandManager";
-import type { SelectionContext } from "../core/commands/selection/setSelectionCommand";
+import type { SelectionContext } from "../core/commands/selectionCommands/setSelectionCommand";
 import { MoveVerticesCommand } from "../core/commands/mesh/moveVerticesCommand";
 import { selectionToVertexIds } from "../core/selection/selectionToVertexIds";
 import { makeSelection } from "../core/selection/selection";
@@ -49,15 +49,48 @@ export class GrabController {
     private hit = new THREE.Vector3();
     private camDir = new THREE.Vector3();
 
+    private readonly mesh: Mesh;
+    private readonly selection: ReturnType<typeof makeSelection>;
+    private readonly commands: CommandManager<SelectionContext>;
+    private readonly cmdCtx: SelectionContext;
+    private readonly camera: THREE.Camera;
+    private readonly getCanvas: () => HTMLCanvasElement;
+    private readonly getPointerClientPos: () => { x: number; y: number };
+    private readonly syncCameraForPicking: () => void;
+    private readonly requestRenderSync: () => void;
+
     constructor(
-        private readonly mesh: Mesh,
-            private readonly selection: ReturnType<typeof makeSelection>,
-                private readonly commands: CommandManager<SelectionContext>,
-                    private readonly cmdCtx: SelectionContext,
-                        private readonly camera: THREE.Camera,
-                            private readonly getCanvas: () => HTMLCanvasElement,
-                                private readonly requestRenderSync: () => void
-    ) {}
+        mesh: Mesh,
+        selection: ReturnType<typeof makeSelection>,
+        commands: CommandManager<SelectionContext>,
+        cmdCtx: SelectionContext,
+        camera: THREE.Camera,
+        getCanvas: () => HTMLCanvasElement,
+
+        /**
+            * Provided by UI/bindings (single source of truth for pointer state).
+            * Must return last-known clientX/clientY (screen coords).
+            */
+        getPointerClientPos: () => { x: number; y: number },
+
+        /**
+            * Provided by renderer/app to force camera/controller state fresh
+            * before computing rays (e.g. OrbitControls.update + camera matrices).
+            */
+        syncCameraForPicking: () => void,
+
+        requestRenderSync: () => void
+    ) {
+        this.mesh = mesh;
+        this.selection = selection;
+        this.commands = commands;
+        this.cmdCtx = cmdCtx;
+        this.camera = camera;
+        this.getCanvas = getCanvas;
+        this.getPointerClientPos = getPointerClientPos;
+        this.syncCameraForPicking = syncCameraForPicking;
+        this.requestRenderSync = requestRenderSync;
+    }
 
     isActive() {
         return this.active;
@@ -66,23 +99,8 @@ export class GrabController {
     beginFromKey(): void {
         if (this.active) return;
 
-        // Helpful debug (what you were logging)
-        // console.log(
-        //   "grab mode:",
-        //   this.selection.mode,
-        //   "face",
-        //   this.selection.faceIds.size,
-        //   "edge",
-        //   this.selection.edgeIds.size,
-        //   "vert",
-        //   this.selection.vertexIds.size
-        // );
-
         const ids = selectionToVertexIds(this.mesh, this.selection);
-        if (ids.length === 0) {
-            // console.log("grab: no vertex ids to move");
-            return;
-        }
+        if (ids.length === 0) return;
 
         this.vertexIds = ids;
 
@@ -90,21 +108,16 @@ export class GrabController {
         const c = centroidOfVertices(this.mesh, this.vertexIds);
         this.pivot.set(c.x, c.y, c.z);
 
-        // Ensure camera matrices are fresh before we compute world direction / ray intersections.
-        this.camera.updateMatrixWorld(true);
-        (this.camera as any).updateProjectionMatrix?.();
+        // Ensure camera/controller state is fresh before computing world direction / rays.
+        this.syncCameraForPicking();
 
-        // plane normal = camera forward, passing through pivot
+        // Plane normal = camera forward, passing through pivot
         (this.camera as any).getWorldDirection?.(this.camDir);
         if (this.camDir.lengthSq() < 1e-12) this.camDir.set(0, 0, -1);
         this.plane.setFromNormalAndCoplanarPoint(this.camDir.normalize(), this.pivot);
 
-        // start intersection uses current mouse position (no click needed)
-        // IMPORTANT FIX: do NOT fail the entire grab if intersectPlane returns null.
-        if (!this.getMouseRayPointOnPlaneOrFallback(this.startHit)) {
-            // console.log("grab: could not compute start point");
-            return;
-        }
+        // Start intersection uses current mouse position (no click needed)
+        if (!this.getMouseRayPointOnPlaneOrFallback(this.startHit)) return;
 
         this.lastDelta = v3(0, 0, 0);
         this.active = true;
@@ -144,6 +157,9 @@ export class GrabController {
     onPointerMove(): void {
         if (!this.active) return;
 
+        // Keep camera/controller state fresh while dragging (cheap insurance).
+        this.syncCameraForPicking();
+
         if (!this.getMouseRayPointOnPlaneOrFallback(this.hit)) return;
 
         const dx = this.hit.x - this.startHit.x;
@@ -163,6 +179,8 @@ export class GrabController {
         if (len2(delta) <= 1e-18) return;
         this.mesh.applyVertexDelta(this.vertexIds, delta);
         this.requestRenderSync();
+        console.log("preview delta", delta);
+
     }
 
     /**
@@ -174,8 +192,7 @@ export class GrabController {
         const canvas = this.getCanvas();
         const rect = canvas.getBoundingClientRect();
 
-        const x = (window as any).__potterMouseX ?? (rect.left + rect.width * 0.5);
-        const y = (window as any).__potterMouseY ?? (rect.top + rect.height * 0.5);
+        const { x, y } = this.getPointerClientPos();
 
         this.ndc.x = ((x - rect.left) / rect.width) * 2 - 1;
         this.ndc.y = -(((y - rect.top) / rect.height) * 2 - 1);
@@ -184,12 +201,14 @@ export class GrabController {
 
         const ray = this.raycaster.ray;
 
-        // primary path
         const hit = ray.intersectPlane(this.plane, out);
-        if (hit !== null) return true;
-
-        // fallback path: closest point on ray to pivot (always defined)
+        if (hit !== null) {
+            console.log("grab hit: plane");
+            return true;
+        }
+        console.log("grab hit: fallback");
         ray.closestPointToPoint(this.pivot, out);
         return true;
+
     }
 }

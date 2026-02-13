@@ -3,8 +3,11 @@ import type { Command } from "./command";
 export class CommandManager<Ctx> {
     private undoStack: Command<Ctx>[] = [];
     private redoStack: Command<Ctx>[] = [];
+    private readonly maxHistory: number | null;
 
-    constructor(private readonly maxHistory: number | null = null) {}
+    constructor(maxHistory: number | null = null) {
+        this.maxHistory = maxHistory;
+    }
 
     execute(ctx: Ctx, cmd: Command<Ctx>): void {
         cmd.do(ctx);

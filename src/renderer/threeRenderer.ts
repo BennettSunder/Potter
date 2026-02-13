@@ -206,6 +206,12 @@ export class ThreeRenderer {
     return this.camera;
   }
 
+  forceCameraUpdate() {
+    this.controls?.update?.();
+    this.camera.updateMatrixWorld(true);
+  }
+//
+
 
   /**
    * Turn gizmo visibility on/off.
@@ -288,12 +294,6 @@ export class ThreeRenderer {
     // -----------------------
     // 2) Index buffer (tris)
     // -----------------------
-    //
-    // Triangulate polygon faces with a fan:
-    //  (v0, v1, v2), (v0, v2, v3), ...
-    //
-    // Assumes convex + consistent winding (fine for cube / early ops).
-
     this.triToFaceId = [];
     this.triIndexByFaceId.clear();
     this.triIndicesByFaceId.clear();
@@ -304,12 +304,11 @@ export class ThreeRenderer {
     for (const f of faces) {
       if (f.verts.length < 3) continue;
 
-      // Convert face vertex IDs -> render indices (IMPORTANT: use renderer's map)
+      // Convert face vertex IDs -> render indices
       const vidx: number[] = [];
       for (const vId of f.verts) {
         const ri = this.vertIndexById.get(vId);
         if (ri === undefined) {
-          // Face references a missing vertex (shouldn't happen in MVP); skip this face
           vidx.length = 0;
           break;
         }
@@ -326,23 +325,17 @@ export class ThreeRenderer {
 
         idx.push(i0, i1, i2);
 
-        // triangle index -> faceId mapping (critical for face picking)
         this.triToFaceId[triOut] = f.id;
         faceTriIndices.push(triOut);
-
         triOut++;
       }
 
       if (faceTriIndices.length > 0) {
-        // Representative tri (kept for back-compat / convenience)
         this.triIndexByFaceId.set(f.id, faceTriIndices[0]);
-
-        // Full list (used by selection overlay to highlight whole face)
         this.triIndicesByFaceId.set(f.id, faceTriIndices);
       }
     }
 
-    // Use 32-bit indices only when needed
     const IndexArray = verts.length > 65535 ? Uint32Array : Uint16Array;
     const idxTyped = new IndexArray(idx);
 
@@ -350,14 +343,13 @@ export class ThreeRenderer {
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setIndex(new THREE.BufferAttribute(idxTyped, 1));
     geo.computeVertexNormals();
-    geo.computeBoundingSphere(); // helps raycasting + culling
+    geo.computeBoundingSphere();
 
     // -----------------------------
     // 3) Tear down old render state
     // -----------------------------
     clearSelectionOverlays(this.scene, this.overlayObjs);
 
-    // Dispose old pick helpers (if present)
     if (this.vertexPoints) {
       this.scene.remove(this.vertexPoints);
       this.vertexPoints.geometry.dispose();
@@ -409,17 +401,41 @@ export class ThreeRenderer {
     rebuildBaseOverlays(this.scene, geo, this.overlayMats, this.overlayObjs);
     this.syncAllObjectTransformsToMesh();
 
-    // Reattach gizmo if it's active
     if (this.gizmoActive) this.gizmos.attach(this.meshObj);
-
-    // IMPORTANT: do NOT force display mode here.
-    // setMesh() can be called during drag/preview; forcing "face" breaks edge/vertex mode.
-    // Whatever code manages mode (main.ts) should call setDisplayMode(mode) once.
 
     // Build pick helpers AFTER mesh objects are replaced
     this.buildVertexPoints(mesh);
     this.buildEdgeLines(mesh);
+
+    console.log("setMesh", {
+      sceneChildren: this.scene.children.length,
+      meshObjId: this.meshObj?.id,
+      backfaceObjId: this.backfaceObj?.id,
+    });
+
+    // -----------------------------
+    // 6) FORCE A FRAME / REQUEST RENDER
+    // -----------------------------
+    // If you have a "render on demand" renderer, this is the missing piece
+    // that prevents the "need to nudge camera" issue.
+    const selfAny = this as any;
+
+    if (typeof selfAny.requestRender === "function") {
+      selfAny.requestRender();
+    } else if (typeof selfAny.renderOnce === "function") {
+      selfAny.renderOnce();
+    } else {
+      // Best-effort direct render if the fields exist
+      // (common naming in ThreeRenderer wrappers)
+      try {
+        selfAny.controls?.update?.();
+        selfAny.renderer?.render?.(selfAny.scene, selfAny.camera);
+      } catch {
+        // ignore: not all renderer implementations expose these fields
+      }
+    }
   }
+
 
 
   // -----------------------

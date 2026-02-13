@@ -35,7 +35,10 @@ import {
 import type { PickHit } from "../renderer/picking";
 
 import { CommandManager } from "../core/commands/commandManager";
-import { SetSelectionCommand, type SelectionContext } from "../core/commands/selectionCommands/setSelectionCommand";
+import {
+    SetSelectionCommand,
+    type SelectionContext,
+} from "../core/commands/selectionCommands/setSelectionCommand";
 import { GrabController } from "./grabController";
 
 // --------------------
@@ -127,11 +130,23 @@ export function startApp(): void {
     };
 
     const syncMeshToRenderer = () => {
-        // Rebuild render buffers after mesh edits
+        // Rebuild render buffers after mesh edits (command commits, topology changes, etc.)
         renderer.setMesh(mesh);
+
         // Keep selection overlays consistent after rebuild
         syncSelectionOverlays();
         syncUI();
+        console.log("syncMeshToRenderer called");
+
+    };
+
+    /**
+     * During grab previews we mutate vertex positions in the core mesh.
+     * Renderer currently does NOT live-update BufferGeometry attributes, so we rebuild.
+     * Keep this lightweight-ish: for MVP this is acceptable.
+     */
+    const requestRenderSync = () => {
+        syncMeshToRenderer();
     };
 
     const applyModeFromSelectionIfNeeded = () => {
@@ -152,6 +167,34 @@ export function startApp(): void {
     syncSelectionOverlays();
 
     // --------------------
+    // Pointer tracking (for Grab)
+    // --------------------
+
+    // Local pointer state (screen/client coords). Avoid globals.
+    let lastClientX = 0;
+    let lastClientY = 0;
+    let hasPointer = false;
+
+    const updatePointer = (e: PointerEvent) => {
+        lastClientX = e.clientX;
+        lastClientY = e.clientY;
+        hasPointer = true;
+    };
+
+    const getPointerClientPos = () => {
+        if (hasPointer) return { x: lastClientX, y: lastClientY };
+
+        // fallback: canvas center before any pointer activity
+        const rect = canvas.getBoundingClientRect();
+        return { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
+    };
+
+    // Track pointer position on window so it stays valid even if pointer leaves canvas.
+    window.addEventListener("pointerup", updatePointer, { capture: true });
+    window.addEventListener("pointerenter", updatePointer, { capture: true });
+
+
+    // --------------------
     // Grab (G) controller
     // --------------------
 
@@ -162,6 +205,15 @@ export function startApp(): void {
     (renderer as any).camera ??
     undefined;
 
+    const syncCameraForPicking = () => {
+        (renderer as any).forceCameraUpdate?.();
+        // Safety: even if renderer doesn't expose forceCameraUpdate, ensure matrices are fresh.
+        if (camera) {
+            camera.updateMatrixWorld(true);
+            (camera as any).updateProjectionMatrix?.();
+        }
+    };
+
     const grab = camera
     ? new GrabController(
         mesh,
@@ -170,36 +222,42 @@ export function startApp(): void {
         cmdCtx,
         camera,
         () => canvas,
-                         syncMeshToRenderer,
+                         getPointerClientPos,
+                         syncCameraForPicking,
+                         requestRenderSync
     )
     : null;
 
-    // Track mouse position so pressing G can start immediately (grabController reads these)
-    window.addEventListener("pointermove", (e) => {
-        (window as any).__potterMouseX = e.clientX;
-        (window as any).__potterMouseY = e.clientY;
+    // While grabbing: pointermove should drive preview updates.
+    // NOTE: GrabController reads pointer via getPointerClientPos(), not event args.
+    window.addEventListener(
+        "pointermove",
+        (e) => {
+            updatePointer(e);
+            if (grab?.isActive()) grab.onPointerMove();
+            console.log("pm", e.clientX, e.clientY, "grab", grab?.isActive());
+        },
+        { capture: true }
+    );
 
-        if (grab?.isActive()) {
-            grab.onPointerMove();
-        }
-    });
+    window.addEventListener(
+        "pointerdown",
+        (e) => {
+            updatePointer(e);
 
-    // Also track mouse position on pointer down (helps “click then press G” without moving mouse)
-    window.addEventListener("pointerdown", (e) => {
-        (window as any).__potterMouseX = e.clientX;
-        (window as any).__potterMouseY = e.clientY;
+            if (!grab?.isActive()) return;
 
-        if (!grab?.isActive()) return;
+            if (e.button === 0) {
+                e.preventDefault();
+                grab.commit();
+            } else if (e.button === 2) {
+                e.preventDefault();
+                grab.cancel();
+            }
+        },
+        { capture: true }
+    );
 
-        // Left click commits, right click cancels
-        if (e.button === 0) {
-            e.preventDefault();
-            grab.commit();
-        } else if (e.button === 2) {
-            e.preventDefault();
-            grab.cancel();
-        }
-    });
 
     // Prevent context menu while grabbing (right click = cancel)
     window.addEventListener("contextmenu", (e) => {
@@ -234,8 +292,8 @@ export function startApp(): void {
                 const tag = (e.target as HTMLElement | null)?.tagName ?? "";
                 if (tag === "INPUT" || tag === "TEXTAREA") return;
 
-                // If your renderer exposes a helper to update camera/controls, call it here.
-                (renderer as any).forceCameraUpdate?.();
+                // Ensure camera state is fresh right at grab start.
+                syncCameraForPicking();
 
                 e.preventDefault();
                 grab.beginFromKey();
@@ -272,6 +330,9 @@ export function startApp(): void {
             setSelectionMode(selection, m);
 
             renderer.setDisplayMode(m);
+            renderer.forceCameraUpdate();
+            // updatePointerPositionFromCanvasCenter();
+
 
             // Core clears selection on mode change; reflect it.
             syncSelectionOverlays();

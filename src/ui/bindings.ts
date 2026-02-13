@@ -76,6 +76,24 @@ export type BindUIOptions = {
      * suspend hover highlight, etc.
      */
     onGizmoCaptureChange?: (captured: boolean) => void;
+
+    /**
+     * Pointer position provider (for tools like GrabController).
+     * This returns the *last known* clientX/clientY (screen coords).
+     */
+    onPointerClientPosProvider?: (getPos: () => { x: number; y: number }) => void;
+
+    /**
+     * Optional: raw pointer move passthrough (useful for tools like GrabController).
+     * Note: this fires on every pointermove over the canvas (not only while dragging gizmo).
+     */
+    onCanvasPointerMove?: (ev: PointerEvent) => void;
+
+    /**
+     * Optional: raw pointer down passthrough (useful for tools like GrabController to
+     * seed mouse position even if the mouse hasn't moved yet).
+     */
+    onCanvasPointerDown?: (ev: PointerEvent) => void;
 };
 
 function fmtNum(n: number): string {
@@ -104,9 +122,43 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         onPick,
         getSelectedVertexIds,
         onGizmoCaptureChange,
+        onPointerClientPosProvider,
+        onCanvasPointerMove,
+        onCanvasPointerDown,
     } = opts;
 
     const canvas = shell.canvas;
+
+    // -------------------------
+    // Pointer tracking (single source of truth)
+    // -------------------------
+
+    let lastClientX = 0;
+    let lastClientY = 0;
+    let hasPointer = false;
+
+    const updatePointer = (ev: PointerEvent) => {
+        lastClientX = ev.clientX;
+        lastClientY = ev.clientY;
+        hasPointer = true;
+    };
+
+    const getPointerClientPos = () => {
+        if (hasPointer) return { x: lastClientX, y: lastClientY };
+
+        // Fallback: canvas center (before any pointer activity)
+        const rect = canvas.getBoundingClientRect();
+        return { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
+    };
+
+    // Hand pointer provider back to app (so GrabController can use it).
+    onPointerClientPosProvider?.(getPointerClientPos);
+
+    // Track pointer on *window* so we don't miss updates when UI overlays / controls
+    // capture events or when the pointer leaves the canvas.
+    window.addEventListener("pointermove", updatePointer, { passive: true });
+    window.addEventListener("pointerdown", updatePointer, { passive: true });
+    window.addEventListener("pointerenter", updatePointer, { passive: true });
 
     // -------------------------
     // Helpers: coords conversion
@@ -202,6 +254,10 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     let gizmoCaptured = false;
 
     const onPointerDown = (ev: PointerEvent) => {
+        // Keep pointer state fresh even if mouse hasn't moved yet.
+        updatePointer(ev);
+        onCanvasPointerDown?.(ev);
+
         // Only left button for selection/drag tools
         if (ev.button !== 0) return;
 
@@ -229,6 +285,11 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     };
 
     const onPointerMove = (ev: PointerEvent) => {
+        // Always keep pointer state fresh.
+        updatePointer(ev);
+        onCanvasPointerMove?.(ev);
+
+        // Gizmo drag path (existing behavior)
         if (!dragging) return;
         if (!gizmoCaptured) return;
 
@@ -269,6 +330,10 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         canvas.removeEventListener("pointerup", endDrag);
         canvas.removeEventListener("pointercancel", endDrag);
         canvas.removeEventListener("pointerleave", endDrag);
+
+        window.removeEventListener("pointermove", updatePointer);
+        window.removeEventListener("pointerdown", updatePointer);
+        window.removeEventListener("pointerenter", updatePointer);
     };
 
     return { dispose };
