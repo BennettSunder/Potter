@@ -167,7 +167,6 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     // capture events or when the pointer leaves the canvas.
     window.addEventListener("pointermove", updatePointer, { passive: true });
     window.addEventListener("pointerdown", updatePointer, { passive: true });
-    window.addEventListener("pointerenter", updatePointer, { passive: true });
 
     // -------------------------
     // Helpers: coords conversion
@@ -415,7 +414,6 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
 
         window.removeEventListener("pointermove", updatePointer);
         window.removeEventListener("pointerdown", updatePointer);
-        window.removeEventListener("pointerenter", updatePointer);
         marquee.remove();
     };
 

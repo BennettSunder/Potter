@@ -27,7 +27,7 @@ export function selectionToVertexIds(
 
     if (sel.mode === "edge") {
         for (const edgeId of sel.edgeIds) {
-            const e = mesh.getEdgeById(edgeId); // <-- YOU MUST HAVE THIS
+            const e = mesh.getEdgeById(edgeId);
             out.add(e.a);
             out.add(e.b);
         }

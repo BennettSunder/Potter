@@ -234,8 +234,6 @@ export function startApp(): void {
         syncSelectionOverlays();
         syncActiveGizmo();
         syncUI();
-        console.log("syncMeshToRenderer called");
-
     };
 
     const makePrimitiveMesh = (kind: PrimitiveKind): Mesh => {
@@ -323,54 +321,8 @@ export function startApp(): void {
         return { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
     };
 
-    const simulateMiddleClickRelease = () => {
-        const rect = canvas.getBoundingClientRect();
-        const clientX = rect.left + rect.width * 0.5;
-        const clientY = rect.top + rect.height * 0.5;
-        const pointerId = -999;
-
-        const pointerInit: PointerEventInit = {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            pointerId,
-            pointerType: "mouse",
-            isPrimary: false,
-            clientX,
-            clientY,
-            button: 1,
-            buttons: 4,
-        };
-
-        const pointerUpInit: PointerEventInit = {
-            ...pointerInit,
-            buttons: 0,
-        };
-
-        const mouseInit: MouseEventInit = {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            clientX,
-            clientY,
-            button: 1,
-            buttons: 4,
-        };
-
-        const mouseUpInit: MouseEventInit = {
-            ...mouseInit,
-            buttons: 0,
-        };
-
-        canvas.dispatchEvent(new PointerEvent("pointerdown", pointerInit));
-        canvas.dispatchEvent(new MouseEvent("mousedown", mouseInit));
-        window.dispatchEvent(new PointerEvent("pointerup", pointerUpInit));
-        window.dispatchEvent(new MouseEvent("mouseup", mouseUpInit));
-    };
-
     // Track pointer position on window so it stays valid even if pointer leaves canvas.
     window.addEventListener("pointerup", updatePointer, { capture: true });
-    window.addEventListener("pointerenter", updatePointer, { capture: true });
 
 
     // --------------------
@@ -651,9 +603,6 @@ export function startApp(): void {
 
             renderer.setDisplayMode(m);
             renderer.forceCameraUpdate();
-            simulateMiddleClickRelease();
-            // updatePointerPositionFromCanvasCenter();
-
 
             // Core clears selection on mode change; reflect it.
             syncSelectionOverlays();

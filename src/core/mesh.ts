@@ -197,6 +197,7 @@ export class Mesh {
         this.edges.length = 0;
 
         const seenKeys = new Set<string>();
+        const nextEdgeIdByKey = new Map<string, Id>();
 
         for (const f of this.faces) {
             const vs = f.verts;
@@ -215,8 +216,8 @@ export class Mesh {
                 let eid = this.edgeIdByKey.get(key);
                 if (!eid) {
                     eid = makeId("e");
-                    this.edgeIdByKey.set(key, eid);
                 }
+                nextEdgeIdByKey.set(key, eid);
 
                 const a = a0 < b0 ? a0 : b0;
                 const b = a0 < b0 ? b0 : a0;
@@ -225,6 +226,7 @@ export class Mesh {
             }
         }
 
+        this.edgeIdByKey = nextEdgeIdByKey;
         this.edges.forEach((e, i) => this.eIndexById.set(e.id, i));
     }
 

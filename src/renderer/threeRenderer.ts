@@ -378,11 +378,11 @@ export class ThreeRenderer {
    * Exposes the camera to allow for other parts of the app
    * to use it and its properties
    */
-  getCamera() {
+  getCamera(): THREE.PerspectiveCamera {
     return this.camera;
   }
 
-  forceCameraUpdate() {
+  forceCameraUpdate(): void {
     this.controls?.update?.();
     this.camera.updateMatrixWorld(true);
   }
@@ -595,12 +595,6 @@ export class ThreeRenderer {
     this.buildVertexPoints(mesh);
     this.buildEdgeLines(mesh);
     this.refreshGizmoTarget();
-
-    console.log("setMesh", {
-      sceneChildren: this.scene.children.length,
-      meshObjId: this.meshObj?.id,
-      backfaceObjId: this.backfaceObj?.id,
-    });
 
     // -----------------------------
     // 6) Request refresh
