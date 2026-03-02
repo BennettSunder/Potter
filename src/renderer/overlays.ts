@@ -22,7 +22,7 @@
 // This keeps selection identity stable (faceId) while rendering stays triangle-based.
 
 import * as THREE from "three";
-import type { Id } from "../core/ids";
+import type { Id } from "../core/ids/ids";
 
 export type DisplayMode = "face" | "edge" | "vertex";
 
@@ -32,7 +32,7 @@ export type OverlayMaterials = {
     vertsMat: THREE.PointsMaterial;
 
     // selection overlays
-    selectedFacesMat: THREE.MeshStandardMaterial;
+    selectedFacesMat: THREE.MeshBasicMaterial;
     selectedVertsMat: THREE.PointsMaterial;
     selectedEdgesMat: THREE.LineBasicMaterial;
 };
@@ -82,7 +82,8 @@ export function createDefaultOverlayMaterials(): OverlayMaterials {
     const selectedEdgesMat = new THREE.LineBasicMaterial({
         transparent: true,
         opacity: 1.0,
-        color: 0xffcc00,
+        color: 0x00ffaa,
+        linewidth: 2,
         depthTest: false,
     });
 

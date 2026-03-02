@@ -3,11 +3,13 @@ import type { Command } from "./command";
 export class CommandManager<Ctx> {
     private undoStack: Command<Ctx>[] = [];
     private redoStack: Command<Ctx>[] = [];
+    private readonly maxHistory: number | null;
 
-    constructor(private readonly maxHistory: number | null = null) {}
+    constructor(maxHistory: number | null = null) {
+        this.maxHistory = maxHistory;
+    }
 
-
-    execute(ctx: Ctx, cmd: Command<Ctx>) {
+    execute(ctx: Ctx, cmd: Command<Ctx>): void {
         cmd.do(ctx);
         this.undoStack.push(cmd);
         this.redoStack.length = 0;
@@ -19,26 +21,25 @@ export class CommandManager<Ctx> {
         }
     }
 
-    undo(ctx: Ctx) {
+    undo(ctx: Ctx): void {
         const cmd = this.undoStack.pop();
         if (!cmd) return;
         cmd.undo(ctx);
         this.redoStack.push(cmd);
     }
 
-    redo(ctx: Ctx) {
+    redo(ctx: Ctx): void {
         const cmd = this.redoStack.pop();
         if (!cmd) return;
         cmd.do(ctx);
         this.undoStack.push(cmd);
     }
 
-    canUndo() { return this.undoStack.length > 0; }
-    canRedo() { return this.redoStack.length > 0; }
+    canUndo(): boolean { return this.undoStack.length > 0; }
+    canRedo(): boolean { return this.redoStack.length > 0; }
 
-    clear() {
+    clear(): void {
         this.undoStack.length = 0;
         this.redoStack.length = 0;
     }
-
 }

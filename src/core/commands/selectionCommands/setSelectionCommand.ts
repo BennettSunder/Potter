@@ -8,11 +8,13 @@ export type SelectionContext = {
 
 export class SetSelectionCommand implements Command<SelectionContext> {
     readonly name = "Set Selection";
+    private readonly before: SelectionSnapshot;
+    private readonly after: SelectionSnapshot;
 
-    constructor(
-        private readonly before: SelectionSnapshot,
-            private readonly after: SelectionSnapshot
-    ) {}
+    constructor(before: SelectionSnapshot, after: SelectionSnapshot) {
+        this.before = before;
+        this.after = after;
+    }
 
     do(ctx: SelectionContext): void {
         applySelectionSnapshot(ctx.selection, this.after);

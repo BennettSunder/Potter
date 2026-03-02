@@ -1,8 +1,13 @@
-import type { Id } from "./ids/ids";
+import type { Id } from "../ids/ids";
 
 export type SelectionMode = "face" | "edge" | "vertex";
 
-export type Selection = ReturnType<typeof makeSelection>;
+export type Selection = {
+    mode: SelectionMode;
+    faceIds: Set<Id>;
+    edgeIds: Set<Id>;
+    vertexIds: Set<Id>;
+};
 
 export type SelectionSnapshot = {
     faceIds: Id[];
@@ -125,4 +130,3 @@ export function inferSelectionModeFromSelection(sel: Selection): SelectionMode |
     if (sel.vertexIds.size > 0) return "vertex";
     return null;
 }
-

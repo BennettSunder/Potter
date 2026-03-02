@@ -1,4 +1,4 @@
-// src/ui/binding.ts
+// src/ui/bindings.ts
 //
 // UI Binding = “glue code” between:
 // - AppShell (DOM controls / radio buttons / status text)
@@ -31,7 +31,6 @@ import type { Id } from "../core/ids/ids";
 export type SelectionMode = DisplayMode;
 
 // The minimal interface we need from your app shell.
-// (This matches what we’ve been building: canvas + selection text + mode change hook.)
 export type AppShellAPI = {
     canvas: HTMLCanvasElement;
 
@@ -54,7 +53,6 @@ export type BindUIOptions = {
 
     /**
      * Ask the app “what selection mode are we in right now?”
-     * (AppShell will usually be the source of truth; your app can store it too.)
      */
     getMode: () => SelectionMode;
 
@@ -63,9 +61,14 @@ export type BindUIOptions = {
      * we convert mouse coords -> NDC, run picking, and report the result.
      *
      * additive = true when shift is held (multi-select behavior).
-     * Your app decides how to apply this to SelectionModel.
+     * hit can be null for empty clicks.
      */
-    onPick: (hit: PickHit, additive: boolean) => void;
+    onPick: (hit: PickHit | null, additive: boolean) => void;
+    onBoxPick?: (
+        ids: ReadonlyArray<Id>,
+        mode: SelectionMode,
+        additive: boolean,
+    ) => void;
 
     /**
      * Optional: provide currently selected vertex IDs so we can display their positions.
@@ -78,11 +81,29 @@ export type BindUIOptions = {
      * suspend hover highlight, etc.
      */
     onGizmoCaptureChange?: (captured: boolean) => void;
+
+    /**
+     * Pointer position provider (for tools like GrabController).
+     * This returns the *last known* clientX/clientY (screen coords).
+     */
+    onPointerClientPosProvider?: (getPos: () => { x: number; y: number }) => void;
+
+    /**
+     * Optional: raw pointer move passthrough (useful for tools like GrabController).
+     * Note: this fires on every pointermove over the canvas (not only while dragging gizmo).
+     */
+    onCanvasPointerMove?: (ev: PointerEvent) => void;
+
+    /**
+     * Optional: raw pointer down passthrough (useful for tools like GrabController to
+     * seed mouse position even if the mouse hasn't moved yet).
+     */
+    onCanvasPointerDown?: (ev: PointerEvent) => void;
+    shouldSuppressPointerDown?: () => boolean;
 };
 
 function fmtNum(n: number): string {
     const v = Math.abs(n) < 1e-9 ? 0 : n; // avoid "-0"
-    // Keep it simple and readable; change to toFixed(2) if you prefer.
     return String(v);
 }
 
@@ -105,11 +126,47 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         mesh,
         getMode,
         onPick,
+        onBoxPick,
         getSelectedVertexIds,
         onGizmoCaptureChange,
+        onPointerClientPosProvider,
+        onCanvasPointerMove,
+        onCanvasPointerDown,
+        shouldSuppressPointerDown,
     } = opts;
 
     const canvas = shell.canvas;
+    const DRAG_SELECT_THRESHOLD_PX = 6;
+
+    // -------------------------
+    // Pointer tracking (single source of truth)
+    // -------------------------
+
+    let lastClientX = 0;
+    let lastClientY = 0;
+    let hasPointer = false;
+
+    const updatePointer = (ev: PointerEvent) => {
+        lastClientX = ev.clientX;
+        lastClientY = ev.clientY;
+        hasPointer = true;
+    };
+
+    const getPointerClientPos = () => {
+        if (hasPointer) return { x: lastClientX, y: lastClientY };
+
+        // Fallback: canvas center (before any pointer activity)
+        const rect = canvas.getBoundingClientRect();
+        return { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
+    };
+
+    // Hand pointer provider back to app (so GrabController can use it).
+    onPointerClientPosProvider?.(getPointerClientPos);
+
+    // Track pointer on *window* so we don't miss updates when UI overlays / controls
+    // capture events or when the pointer leaves the canvas.
+    window.addEventListener("pointermove", updatePointer, { passive: true });
+    window.addEventListener("pointerdown", updatePointer, { passive: true });
 
     // -------------------------
     // Helpers: coords conversion
@@ -117,7 +174,7 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
 
     /**
      * Convert a PointerEvent to NDC (Normalized Device Coordinates):
-     * -1..+1 in X and Y, suitable for Three.js raycasting and our screen-space picking.
+     * -1..+1 in X and Y, suitable for Three.js raycasting and our picking.
      */
     const eventToNdc = (ev: PointerEvent): { ndcX: number; ndcY: number } => {
         const rect = renderer.getCanvasRectCssPx();
@@ -134,55 +191,37 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     };
 
     /**
-     * Calls the correct picking routine based on mode.
-     * - face: raycast against mesh triangles, mapped back to faceId
-     * - edge: screen-space point-to-segment within radius
-     * - vertex: screen-space point-to-point within radius
+     * Unified picking call.
+     * Renderer decides how to pick based on mode.
      */
-    const runPick = (ndcX: number, ndcY: number): PickHit => {
+    const runPick = (ndcX: number, ndcY: number): PickHit | null => {
         const mode = getMode();
-
-        // These radii are “UI feel” values. If you want, we can centralize them in tolerances.ts.
-        const EDGE_RADIUS_PX = 8;
-        const VERT_RADIUS_PX = 10;
-
-        if (mode === "face") return renderer.pick(ndcX, ndcY);
-        if (mode === "edge") return renderer.pickLine(ndcX, ndcY, EDGE_RADIUS_PX);
-        return renderer.pickVertex(ndcX, ndcY, VERT_RADIUS_PX);
+        return renderer.pick(ndcX, ndcY, mode);
     };
 
     // -------------------------
     // Mode change -> renderer UI
     // -------------------------
 
-    // When the user switches selection mode, update renderer overlay visibility.
     shell.onModeChange((mode) => {
         renderer.setDisplayMode(mode);
-        // Note: your app may also want to clear selection or keep it.
-        // We do NOT decide that here.
     });
 
     // -------------------------
     // UI status text helpers
     // -------------------------
 
-    /**
-     * Update the status text after an action, using the mode + selection state.
-     * In vertex mode, we prefer to show selected vertex positions if available.
-     */
     const updateStatusText = (hit: PickHit | null) => {
         const mode = getMode();
 
         if (mode !== "vertex") {
-            // Keep it compact for face/edge modes
+            // Compact for face/edge modes
             if (!hit) shell.setSelectionText("(none)");
             else shell.setSelectionText(`${hit.type} ${String(hit.id)}`);
             return;
         }
 
         // Vertex mode: show positions.
-        // Prefer showing all selected vertex positions (if app provides them),
-        // otherwise show just the picked vertex position.
         const ids = getSelectedVertexIds ? Array.from(getSelectedVertexIds()) : null;
 
         if (ids && ids.length > 0) {
@@ -221,18 +260,63 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
 
     let dragging = false;
     let gizmoCaptured = false;
+    let selectionBoxActive = false;
+    let selectionBoxMoved = false;
+    let selectionBoxPointerId: number | null = null;
+    let selectionStart = { x: 0, y: 0 };
+    let selectionCurrent = { x: 0, y: 0 };
+
+    const marquee = document.createElement("div");
+    marquee.style.position = "fixed";
+    marquee.style.display = "none";
+    marquee.style.pointerEvents = "none";
+    marquee.style.zIndex = "20";
+    marquee.style.border = "1px solid #9aa0ff";
+    marquee.style.background = "rgba(154, 160, 255, 0.18)";
+    marquee.style.boxSizing = "border-box";
+    document.body.appendChild(marquee);
+
+    const hideMarquee = () => {
+        marquee.style.display = "none";
+    };
+
+    const updateMarquee = () => {
+        const left = Math.min(selectionStart.x, selectionCurrent.x);
+        const top = Math.min(selectionStart.y, selectionCurrent.y);
+        const width = Math.abs(selectionCurrent.x - selectionStart.x);
+        const height = Math.abs(selectionCurrent.y - selectionStart.y);
+
+        marquee.style.display = "block";
+        marquee.style.left = `${left}px`;
+        marquee.style.top = `${top}px`;
+        marquee.style.width = `${width}px`;
+        marquee.style.height = `${height}px`;
+    };
 
     const onPointerDown = (ev: PointerEvent) => {
+        // Keep pointer state fresh even if mouse hasn't moved yet.
+        updatePointer(ev);
+        onCanvasPointerDown?.(ev);
+
         // Only left button for selection/drag tools
         if (ev.button !== 0) return;
 
-        // Important: avoid selecting while orbit controls might be using middle button, etc.
+        if (shouldSuppressPointerDown?.()) {
+            ev.preventDefault();
+            return;
+        }
+
         ev.preventDefault();
 
         const { ndcX, ndcY } = eventToNdc(ev);
 
         // First chance: gizmo tries to capture the drag.
-        gizmoCaptured = renderer.gizmoPointerDown(ndcX, ndcY);
+        const gizmoInteraction = renderer.gizmoPointerDown(ndcX, ndcY);
+        gizmoCaptured = gizmoInteraction === "drag";
+        if (gizmoInteraction === "modal") {
+            dragging = false;
+            return;
+        }
         if (gizmoCaptured) {
             dragging = true;
             canvas.setPointerCapture(ev.pointerId);
@@ -240,23 +324,42 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
             return;
         }
 
-        // Otherwise: do normal picking.
-        const hit = runPick(ndcX, ndcY);
-        const additive = ev.shiftKey;
-
-        onPick(hit, additive);
-
-        // UI feedback: show IDs for face/edge, positions for vertex mode.
-        updateStatusText(hit);
+        dragging = true;
+        selectionBoxActive = true;
+        selectionBoxMoved = false;
+        selectionBoxPointerId = ev.pointerId;
+        selectionStart = { x: ev.clientX, y: ev.clientY };
+        selectionCurrent = { x: ev.clientX, y: ev.clientY };
+        canvas.setPointerCapture(ev.pointerId);
     };
 
     const onPointerMove = (ev: PointerEvent) => {
-        if (!dragging) return;
-        if (!gizmoCaptured) return;
+        // Always keep pointer state fresh.
+        updatePointer(ev);
+        onCanvasPointerMove?.(ev);
 
-        ev.preventDefault();
         const { ndcX, ndcY } = eventToNdc(ev);
-        renderer.gizmoPointerMove(ndcX, ndcY);
+
+        // Gizmo drag path (existing behavior)
+        if (!dragging) {
+            renderer.gizmoPointerHover(ndcX, ndcY);
+            return;
+        }
+        if (gizmoCaptured) {
+            ev.preventDefault();
+            renderer.gizmoPointerMove(ndcX, ndcY);
+            return;
+        }
+
+        if (!selectionBoxActive || selectionBoxPointerId !== ev.pointerId) return;
+
+        const dx = ev.clientX - selectionStart.x;
+        const dy = ev.clientY - selectionStart.y;
+        if (!selectionBoxMoved && Math.hypot(dx, dy) < DRAG_SELECT_THRESHOLD_PX) return;
+
+        selectionBoxMoved = true;
+        selectionCurrent = { x: ev.clientX, y: ev.clientY };
+        updateMarquee();
     };
 
     const endDrag = (ev: PointerEvent) => {
@@ -270,12 +373,31 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
             onGizmoCaptureChange?.(false);
         }
 
+        if (selectionBoxActive && selectionBoxPointerId === ev.pointerId) {
+            const additive = ev.shiftKey;
+
+            if (selectionBoxMoved) {
+                const ids = renderer.boxSelect(selectionStart, selectionCurrent, getMode());
+                onBoxPick?.(ids, getMode(), additive);
+                updateStatusText(null);
+            } else {
+                const { ndcX, ndcY } = eventToNdc(ev);
+                const hit = runPick(ndcX, ndcY);
+                onPick(hit, additive);
+                updateStatusText(hit);
+            }
+        }
+
         dragging = false;
+        selectionBoxActive = false;
+        selectionBoxMoved = false;
+        selectionBoxPointerId = null;
+        hideMarquee();
 
         try {
             canvas.releasePointerCapture(ev.pointerId);
         } catch {
-            // no-op: can throw if capture wasn't set; safe to ignore
+            // can throw if capture wasn't set; ignore
         }
     };
 
@@ -283,18 +405,16 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
-    canvas.addEventListener("pointerleave", endDrag);
-
-    // -------------------------
-    // Dispose (hot reload safety)
-    // -------------------------
 
     const dispose = () => {
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerup", endDrag);
         canvas.removeEventListener("pointercancel", endDrag);
-        canvas.removeEventListener("pointerleave", endDrag);
+
+        window.removeEventListener("pointermove", updatePointer);
+        window.removeEventListener("pointerdown", updatePointer);
+        marquee.remove();
     };
 
     return { dispose };
