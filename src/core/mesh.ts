@@ -39,6 +39,11 @@ export type Edge = {
     b: Id;
 };
 
+export type MeshSnapshot = {
+    vertices: Vertex[];
+    faces: Face[];
+};
+
 function edgeKey(a: Id, b: Id): string {
     // Deterministic undirected key
     return a < b ? `${a}|${b}` : `${b}|${a}`;
@@ -97,6 +102,31 @@ export class Mesh {
 
     getEdges(): ReadonlyArray<Edge> {
         return this.edges;
+    }
+
+    snapshot(): MeshSnapshot {
+        return {
+            vertices: this.vertices.map((v) => ({
+                id: v.id,
+                position: { ...v.position },
+            })),
+            faces: this.faces.map((f) => ({
+                id: f.id,
+                verts: [...f.verts],
+            })),
+        };
+    }
+
+    restore(snapshot: MeshSnapshot): void {
+        this.vertices = snapshot.vertices.map((v) => ({
+            id: v.id,
+            position: { ...v.position },
+        }));
+        this.faces = snapshot.faces.map((f) => ({
+            id: f.id,
+            verts: [...f.verts],
+        }));
+        this.rebuildMaps();
     }
 
     // ----------------
@@ -227,6 +257,115 @@ export class Mesh {
     }
 }
 
+function makeMeshFromIndexedPolygons(
+    positions: readonly Vec3[],
+    polygons: readonly (readonly number[])[]
+): Mesh {
+    const m = new Mesh();
+    const ids = positions.map((p) => m.addVertex({ x: p.x, y: p.y, z: p.z }));
+    for (const poly of polygons) {
+        m.addFace(poly.map((i) => ids[i]!));
+    }
+    return m;
+}
+
+function normalizePositionsToHalfExtent(positions: Vec3[]): Vec3[] {
+    let maxAbs = 0;
+    for (const p of positions) {
+        maxAbs = Math.max(maxAbs, Math.abs(p.x), Math.abs(p.y), Math.abs(p.z));
+    }
+    if (maxAbs <= 1e-9) return positions.map((p) => ({ ...p }));
+    const s = 0.5 / maxAbs;
+    return positions.map((p) => ({ x: p.x * s, y: p.y * s, z: p.z * s }));
+}
+
+function makeIcosahedronData(): { positions: Vec3[]; faces: number[][] } {
+    const phi = (1 + Math.sqrt(5)) * 0.5;
+
+    const positions: Vec3[] = [
+        { x: -1, y: phi, z: 0 },
+        { x: 1, y: phi, z: 0 },
+        { x: -1, y: -phi, z: 0 },
+        { x: 1, y: -phi, z: 0 },
+        { x: 0, y: -1, z: phi },
+        { x: 0, y: 1, z: phi },
+        { x: 0, y: -1, z: -phi },
+        { x: 0, y: 1, z: -phi },
+        { x: phi, y: 0, z: -1 },
+        { x: phi, y: 0, z: 1 },
+        { x: -phi, y: 0, z: -1 },
+        { x: -phi, y: 0, z: 1 },
+    ];
+
+    const faces: number[][] = [
+        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+    ];
+
+    return { positions, faces };
+}
+
+function vecSub(a: Vec3, b: Vec3): Vec3 {
+    return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+function vecDot(a: Vec3, b: Vec3): number {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function vecCross(a: Vec3, b: Vec3): Vec3 {
+    return {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    };
+}
+
+function vecScale(a: Vec3, s: number): Vec3 {
+    return { x: a.x * s, y: a.y * s, z: a.z * s };
+}
+
+function vecLen(a: Vec3): number {
+    return Math.sqrt(vecDot(a, a));
+}
+
+function vecNormalize(a: Vec3): Vec3 {
+    const len = vecLen(a);
+    if (len <= 1e-9) return { x: 0, y: 0, z: 0 };
+    return vecScale(a, 1 / len);
+}
+
+function faceNormal(indices: readonly number[], positions: readonly Vec3[]): Vec3 {
+    if (indices.length < 3) return { x: 0, y: 0, z: 0 };
+    const a = positions[indices[0]]!;
+    const b = positions[indices[1]]!;
+    const c = positions[indices[2]]!;
+    return vecCross(vecSub(b, a), vecSub(c, a));
+}
+
+function faceCentroid(indices: readonly number[], positions: readonly Vec3[]): Vec3 {
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    for (const i of indices) {
+        const p = positions[i]!;
+        x += p.x;
+        y += p.y;
+        z += p.z;
+    }
+    const n = indices.length || 1;
+    return { x: x / n, y: y / n, z: z / n };
+}
+
+function ensureOutward(indices: number[], positions: readonly Vec3[]): number[] {
+    const n = faceNormal(indices, positions);
+    const c = faceCentroid(indices, positions);
+    if (vecDot(n, c) < 0) return [...indices].reverse();
+    return indices;
+}
+
 // ------------------------------
 // Example primitive: unit cube
 // ------------------------------
@@ -266,4 +405,87 @@ export function makeUnitCubeMesh(): Mesh {
     q(1, 5, 7, 3);
 
     return m;
+}
+
+export function makeCubeMesh(): Mesh {
+    return makeUnitCubeMesh();
+}
+
+export function makeIcosahedronMesh(): Mesh {
+    const { positions, faces } = makeIcosahedronData();
+    const normalized = normalizePositionsToHalfExtent(positions);
+    return makeMeshFromIndexedPolygons(normalized, faces);
+}
+
+export function makeTruncatedIcosahedronMesh(): Mesh {
+    const { positions: icoPositions, faces: icoFaces } = makeIcosahedronData();
+
+    const outPositions: Vec3[] = [];
+    const orientedIndex = new Map<string, number>();
+
+    const key = (a: number, b: number) => `${a}->${b}`;
+    const getOrientedIndex = (a: number, b: number): number => {
+        const k = key(a, b);
+        const found = orientedIndex.get(k);
+        if (found !== undefined) return found;
+
+        const pa = icoPositions[a]!;
+        const pb = icoPositions[b]!;
+        const p = {
+            x: (2 * pa.x + pb.x) / 3,
+            y: (2 * pa.y + pb.y) / 3,
+            z: (2 * pa.z + pb.z) / 3,
+        };
+        const idx = outPositions.length;
+        outPositions.push(p);
+        orientedIndex.set(k, idx);
+        return idx;
+    };
+
+    const hexFaces: number[][] = icoFaces.map(([a, b, c]) => [
+        getOrientedIndex(a, b),
+        getOrientedIndex(b, a),
+        getOrientedIndex(b, c),
+        getOrientedIndex(c, b),
+        getOrientedIndex(c, a),
+        getOrientedIndex(a, c),
+    ]);
+
+    const neighborsByVertex = new Map<number, Set<number>>();
+    for (const [a, b, c] of icoFaces) {
+        if (!neighborsByVertex.has(a)) neighborsByVertex.set(a, new Set<number>());
+        if (!neighborsByVertex.has(b)) neighborsByVertex.set(b, new Set<number>());
+        if (!neighborsByVertex.has(c)) neighborsByVertex.set(c, new Set<number>());
+
+        neighborsByVertex.get(a)!.add(b);
+        neighborsByVertex.get(a)!.add(c);
+        neighborsByVertex.get(b)!.add(a);
+        neighborsByVertex.get(b)!.add(c);
+        neighborsByVertex.get(c)!.add(a);
+        neighborsByVertex.get(c)!.add(b);
+    }
+
+    const pentFaces: number[][] = [];
+    for (let i = 0; i < icoPositions.length; i++) {
+        const neighbors = Array.from(neighborsByVertex.get(i) ?? []);
+        if (neighbors.length !== 5) continue;
+
+        const center = vecNormalize(icoPositions[i]!);
+        const first = vecNormalize(vecSub(icoPositions[neighbors[0]]!, vecScale(center, vecDot(icoPositions[neighbors[0]]!, center))));
+        const tangent = vecNormalize(vecCross(center, first));
+
+        neighbors.sort((u, v) => {
+            const pu = vecNormalize(vecSub(icoPositions[u]!, vecScale(center, vecDot(icoPositions[u]!, center))));
+            const pv = vecNormalize(vecSub(icoPositions[v]!, vecScale(center, vecDot(icoPositions[v]!, center))));
+            const au = Math.atan2(vecDot(pu, tangent), vecDot(pu, first));
+            const av = Math.atan2(vecDot(pv, tangent), vecDot(pv, first));
+            return au - av;
+        });
+
+        pentFaces.push(neighbors.map((n) => getOrientedIndex(i, n)));
+    }
+
+    const allFaces = [...hexFaces, ...pentFaces].map((f) => ensureOutward(f, outPositions));
+    const normalized = normalizePositionsToHalfExtent(outPositions);
+    return makeMeshFromIndexedPolygons(normalized, allFaces);
 }

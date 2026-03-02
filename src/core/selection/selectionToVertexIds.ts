@@ -11,9 +11,9 @@ export function selectionToVertexIds(
     if (sel.mode === "face") {
         for (const faceId of sel.faceIds) {
             const f = mesh.getFaceById(faceId);
-            out.add(f.verts[0]);
-            out.add(f.verts[1]);
-            out.add(f.verts[2]);
+            for (const vId of f.verts) {
+                out.add(vId);
+            }
         }
         return [...out];
     }

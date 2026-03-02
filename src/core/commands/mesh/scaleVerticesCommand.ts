@@ -9,18 +9,29 @@ function cloneVec3(v: Vec3): Vec3 {
     return { x: v.x, y: v.y, z: v.z };
 }
 
-export class MoveVerticesCommand implements Command<SelectionContext> {
-    readonly name = "Move Vertices";
+function scaleAroundCenter(pos: Vec3, center: Vec3, factor: number): Vec3 {
+    return {
+        x: center.x + (pos.x - center.x) * factor,
+        y: center.y + (pos.y - center.y) * factor,
+        z: center.z + (pos.z - center.z) * factor,
+    };
+}
+
+export class ScaleVerticesCommand implements Command<SelectionContext> {
+    readonly name = "Scale Vertices";
 
     private readonly mesh: Mesh;
     private readonly vertexIds: readonly Id[];
-    private readonly delta: Vec3;
+    private readonly center: Vec3;
+    private readonly factor: number;
     private before: PosMap | null = null;
 
-    constructor(mesh: Mesh, vertexIds: readonly Id[], delta: Vec3) {
+    constructor(mesh: Mesh, vertexIds: readonly Id[], center: Vec3, factor: number) {
         this.mesh = mesh;
         this.vertexIds = vertexIds;
-        this.delta = delta;
+        this.center = center;
+        this.factor = factor;
+        this.before = null;
     }
 
     do(_ctx: SelectionContext): void {
@@ -32,7 +43,11 @@ export class MoveVerticesCommand implements Command<SelectionContext> {
             this.before = before;
         }
 
-        this.mesh.applyVertexDelta(this.vertexIds, this.delta);
+        for (const id of this.vertexIds) {
+            const base = this.before.get(id);
+            if (!base) continue;
+            this.mesh.setVertexPosition(id, scaleAroundCenter(base, this.center, this.factor));
+        }
     }
 
     undo(_ctx: SelectionContext): void {

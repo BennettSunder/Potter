@@ -64,6 +64,11 @@ export type BindUIOptions = {
      * hit can be null for empty clicks.
      */
     onPick: (hit: PickHit | null, additive: boolean) => void;
+    onBoxPick?: (
+        ids: ReadonlyArray<Id>,
+        mode: SelectionMode,
+        additive: boolean,
+    ) => void;
 
     /**
      * Optional: provide currently selected vertex IDs so we can display their positions.
@@ -94,6 +99,7 @@ export type BindUIOptions = {
      * seed mouse position even if the mouse hasn't moved yet).
      */
     onCanvasPointerDown?: (ev: PointerEvent) => void;
+    shouldSuppressPointerDown?: () => boolean;
 };
 
 function fmtNum(n: number): string {
@@ -120,14 +126,17 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         mesh,
         getMode,
         onPick,
+        onBoxPick,
         getSelectedVertexIds,
         onGizmoCaptureChange,
         onPointerClientPosProvider,
         onCanvasPointerMove,
         onCanvasPointerDown,
+        shouldSuppressPointerDown,
     } = opts;
 
     const canvas = shell.canvas;
+    const DRAG_SELECT_THRESHOLD_PX = 6;
 
     // -------------------------
     // Pointer tracking (single source of truth)
@@ -252,6 +261,38 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
 
     let dragging = false;
     let gizmoCaptured = false;
+    let selectionBoxActive = false;
+    let selectionBoxMoved = false;
+    let selectionBoxPointerId: number | null = null;
+    let selectionStart = { x: 0, y: 0 };
+    let selectionCurrent = { x: 0, y: 0 };
+
+    const marquee = document.createElement("div");
+    marquee.style.position = "fixed";
+    marquee.style.display = "none";
+    marquee.style.pointerEvents = "none";
+    marquee.style.zIndex = "20";
+    marquee.style.border = "1px solid #9aa0ff";
+    marquee.style.background = "rgba(154, 160, 255, 0.18)";
+    marquee.style.boxSizing = "border-box";
+    document.body.appendChild(marquee);
+
+    const hideMarquee = () => {
+        marquee.style.display = "none";
+    };
+
+    const updateMarquee = () => {
+        const left = Math.min(selectionStart.x, selectionCurrent.x);
+        const top = Math.min(selectionStart.y, selectionCurrent.y);
+        const width = Math.abs(selectionCurrent.x - selectionStart.x);
+        const height = Math.abs(selectionCurrent.y - selectionStart.y);
+
+        marquee.style.display = "block";
+        marquee.style.left = `${left}px`;
+        marquee.style.top = `${top}px`;
+        marquee.style.width = `${width}px`;
+        marquee.style.height = `${height}px`;
+    };
 
     const onPointerDown = (ev: PointerEvent) => {
         // Keep pointer state fresh even if mouse hasn't moved yet.
@@ -261,12 +302,22 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         // Only left button for selection/drag tools
         if (ev.button !== 0) return;
 
+        if (shouldSuppressPointerDown?.()) {
+            ev.preventDefault();
+            return;
+        }
+
         ev.preventDefault();
 
         const { ndcX, ndcY } = eventToNdc(ev);
 
         // First chance: gizmo tries to capture the drag.
-        gizmoCaptured = renderer.gizmoPointerDown(ndcX, ndcY);
+        const gizmoInteraction = renderer.gizmoPointerDown(ndcX, ndcY);
+        gizmoCaptured = gizmoInteraction === "drag";
+        if (gizmoInteraction === "modal") {
+            dragging = false;
+            return;
+        }
         if (gizmoCaptured) {
             dragging = true;
             canvas.setPointerCapture(ev.pointerId);
@@ -274,14 +325,13 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
             return;
         }
 
-        // Otherwise: do normal picking (can be null)
-        const hit = runPick(ndcX, ndcY);
-        const additive = ev.shiftKey;
-
-        onPick(hit, additive);
-
-        // UI feedback
-        updateStatusText(hit);
+        dragging = true;
+        selectionBoxActive = true;
+        selectionBoxMoved = false;
+        selectionBoxPointerId = ev.pointerId;
+        selectionStart = { x: ev.clientX, y: ev.clientY };
+        selectionCurrent = { x: ev.clientX, y: ev.clientY };
+        canvas.setPointerCapture(ev.pointerId);
     };
 
     const onPointerMove = (ev: PointerEvent) => {
@@ -289,13 +339,28 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         updatePointer(ev);
         onCanvasPointerMove?.(ev);
 
-        // Gizmo drag path (existing behavior)
-        if (!dragging) return;
-        if (!gizmoCaptured) return;
-
-        ev.preventDefault();
         const { ndcX, ndcY } = eventToNdc(ev);
-        renderer.gizmoPointerMove(ndcX, ndcY);
+
+        // Gizmo drag path (existing behavior)
+        if (!dragging) {
+            renderer.gizmoPointerHover(ndcX, ndcY);
+            return;
+        }
+        if (gizmoCaptured) {
+            ev.preventDefault();
+            renderer.gizmoPointerMove(ndcX, ndcY);
+            return;
+        }
+
+        if (!selectionBoxActive || selectionBoxPointerId !== ev.pointerId) return;
+
+        const dx = ev.clientX - selectionStart.x;
+        const dy = ev.clientY - selectionStart.y;
+        if (!selectionBoxMoved && Math.hypot(dx, dy) < DRAG_SELECT_THRESHOLD_PX) return;
+
+        selectionBoxMoved = true;
+        selectionCurrent = { x: ev.clientX, y: ev.clientY };
+        updateMarquee();
     };
 
     const endDrag = (ev: PointerEvent) => {
@@ -309,7 +374,26 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
             onGizmoCaptureChange?.(false);
         }
 
+        if (selectionBoxActive && selectionBoxPointerId === ev.pointerId) {
+            const additive = ev.shiftKey;
+
+            if (selectionBoxMoved) {
+                const ids = renderer.boxSelect(selectionStart, selectionCurrent, getMode());
+                onBoxPick?.(ids, getMode(), additive);
+                updateStatusText(null);
+            } else {
+                const { ndcX, ndcY } = eventToNdc(ev);
+                const hit = runPick(ndcX, ndcY);
+                onPick(hit, additive);
+                updateStatusText(hit);
+            }
+        }
+
         dragging = false;
+        selectionBoxActive = false;
+        selectionBoxMoved = false;
+        selectionBoxPointerId = null;
+        hideMarquee();
 
         try {
             canvas.releasePointerCapture(ev.pointerId);
@@ -322,18 +406,17 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
-    canvas.addEventListener("pointerleave", endDrag);
 
     const dispose = () => {
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerup", endDrag);
         canvas.removeEventListener("pointercancel", endDrag);
-        canvas.removeEventListener("pointerleave", endDrag);
 
         window.removeEventListener("pointermove", updatePointer);
         window.removeEventListener("pointerdown", updatePointer);
         window.removeEventListener("pointerenter", updatePointer);
+        marquee.remove();
     };
 
     return { dispose };
