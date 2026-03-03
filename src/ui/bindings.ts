@@ -100,6 +100,8 @@ export type BindUIOptions = {
      */
     onCanvasPointerDown?: (ev: PointerEvent) => void;
     shouldSuppressPointerDown?: () => boolean;
+    onBeforePickPointerDown?: (ndcX: number, ndcY: number) => boolean;
+    shouldRoutePointerToCamera?: (ev: PointerEvent) => boolean;
 };
 
 function fmtNum(n: number): string {
@@ -133,6 +135,8 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         onCanvasPointerMove,
         onCanvasPointerDown,
         shouldSuppressPointerDown,
+        onBeforePickPointerDown,
+        shouldRoutePointerToCamera,
     } = opts;
 
     const canvas = shell.canvas;
@@ -301,14 +305,25 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         // Only left button for selection/drag tools
         if (ev.button !== 0) return;
 
+        if (shouldRoutePointerToCamera?.(ev)) {
+            return;
+        }
+
         if (shouldSuppressPointerDown?.()) {
+            ev.stopPropagation();
             ev.preventDefault();
             return;
         }
 
+        ev.stopPropagation();
         ev.preventDefault();
 
         const { ndcX, ndcY } = eventToNdc(ev);
+
+        if (onBeforePickPointerDown?.(ndcX, ndcY)) {
+            dragging = false;
+            return;
+        }
 
         // First chance: gizmo tries to capture the drag.
         const gizmoInteraction = renderer.gizmoPointerDown(ndcX, ndcY);
@@ -401,13 +416,13 @@ export function bindUI(opts: BindUIOptions): { dispose: () => void } {
         }
     };
 
-    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointerdown", onPointerDown, { capture: true });
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
 
     const dispose = () => {
-        canvas.removeEventListener("pointerdown", onPointerDown);
+        canvas.removeEventListener("pointerdown", onPointerDown, { capture: true });
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerup", endDrag);
         canvas.removeEventListener("pointercancel", endDrag);

@@ -83,8 +83,25 @@ type ExtrudePlan = {
     newVertexIdByOld: Map<Id, Id>;
     topFaceIdByBase: Map<Id, Id>;
     boundaryEdges: Array<{ a: Id; b: Id; sideFaceId: Id }>;
+    facePlanById: Map<Id, {
+        normal: Vec3;
+        newVertexIds: Id[];
+        sideFaceIds: Id[];
+    }>;
     initialSelection: SelectionSnapshot;
 };
+
+export function getExtrudePreview(
+    mesh: Mesh,
+    selection: ReturnType<typeof makeSelection>,
+): { origin: Vec3; direction: Vec3 } | null {
+    const plan = buildExtrudePlan(mesh, selection);
+    if (!plan) return null;
+    return {
+        origin: plan.center,
+        direction: plan.normal,
+    };
+}
 
 function buildFaceSelection(mesh: Mesh, selection: ReturnType<typeof makeSelection>): Id[] {
     if (selection.mode === "face") return Array.from(selection.faceIds);
@@ -151,6 +168,20 @@ function buildExtrudePlan(mesh: Mesh, selection: ReturnType<typeof makeSelection
     const topFaceIdByBase = new Map<Id, Id>();
     for (const face of faces) topFaceIdByBase.set(face.id, makeId("f"));
 
+    const facePlanById = new Map<Id, {
+        normal: Vec3;
+        newVertexIds: Id[];
+        sideFaceIds: Id[];
+    }>();
+    for (const face of faces) {
+        const faceNormal = normalize(polygonNormal(face, positions));
+        facePlanById.set(face.id, {
+            normal: length(faceNormal) < 1e-8 ? normal : faceNormal,
+            newVertexIds: face.verts.map(() => makeId("v")),
+            sideFaceIds: face.verts.map(() => makeId("f")),
+        });
+    }
+
     const boundaryEdges: Array<{ a: Id; b: Id; sideFaceId: Id }> = [];
     for (const [key, count] of boundaryCount.entries()) {
         if (count !== 1) continue;
@@ -167,6 +198,7 @@ function buildExtrudePlan(mesh: Mesh, selection: ReturnType<typeof makeSelection
         newVertexIdByOld,
         topFaceIdByBase,
         boundaryEdges,
+        facePlanById,
         initialSelection: snapshotSelection(selection),
     };
 }
@@ -177,16 +209,14 @@ function snapshotPositions(snapshot: MeshSnapshot): Map<Id, Vec3> {
     return out;
 }
 
-function orientFaceOutward(
+function orientFaceTowardNormal(
     verts: Id[],
     positions: Map<Id, Vec3>,
-    meshCentroid: Vec3
+    referenceNormal: Vec3,
 ): Id[] {
-    const face: Face = { id: "tmp" as Id, verts };
+    const face: Face = { id: "tmp" as Id, verts, shading: "smooth" };
     const normal = polygonNormal(face, positions);
-    const center = centroidOfVertexIds(verts, positions);
-    const away = sub(center, meshCentroid);
-    return dot(normal, away) >= 0 ? verts : [...verts].reverse();
+    return dot(normal, referenceNormal) >= 0 ? verts : [...verts].reverse();
 }
 
 function buildExtrudedSnapshot(before: MeshSnapshot, plan: ExtrudePlan, distance: number): MeshSnapshot {
@@ -205,21 +235,25 @@ function buildExtrudedSnapshot(before: MeshSnapshot, plan: ExtrudePlan, distance
         });
     }
 
-    const outFaces = before.faces.map((face) => ({
-        id: face.id,
-        verts: [...face.verts],
-    }));
+    const selectedFaceIds = new Set(plan.faceIds);
+    const outFaces = before.faces
+        .filter((face) => !selectedFaceIds.has(face.id))
+        .map((face) => ({
+            id: face.id,
+            verts: [...face.verts],
+            shading: face.shading,
+        }));
 
     const allPositions = new Map<Id, Vec3>();
     for (const vertex of outVertices) allPositions.set(vertex.id, { ...vertex.position });
-    const meshCentroid = centroidOfVertexIds(allPositions.keys(), allPositions);
 
     for (const face of before.faces) {
         if (!plan.topFaceIdByBase.has(face.id)) continue;
         const topVerts = face.verts.map((id) => plan.newVertexIdByOld.get(id)!);
         outFaces.push({
             id: plan.topFaceIdByBase.get(face.id)!,
-            verts: orientFaceOutward(topVerts, allPositions, meshCentroid),
+            verts: orientFaceTowardNormal(topVerts, allPositions, plan.normal),
+            shading: face.shading,
         });
     }
 
@@ -230,9 +264,20 @@ function buildExtrudedSnapshot(before: MeshSnapshot, plan: ExtrudePlan, distance
             plan.newVertexIdByOld.get(edge.b)!,
             plan.newVertexIdByOld.get(edge.a)!,
         ];
+        const baseA = allPositions.get(edge.a)!;
+        const baseB = allPositions.get(edge.b)!;
+        const topA = allPositions.get(plan.newVertexIdByOld.get(edge.a)!)!;
+        const offsetVec = sub(topA, baseA);
+        const edgeVec = sub(baseB, baseA);
+        const outward = {
+            x: edgeVec.y * offsetVec.z - edgeVec.z * offsetVec.y,
+            y: edgeVec.z * offsetVec.x - edgeVec.x * offsetVec.z,
+            z: edgeVec.x * offsetVec.y - edgeVec.y * offsetVec.x,
+        };
         outFaces.push({
             id: edge.sideFaceId,
-            verts: orientFaceOutward(sideVerts, allPositions, meshCentroid),
+            verts: orientFaceTowardNormal(sideVerts, allPositions, outward),
+            shading: "smooth",
         });
     }
 
@@ -241,6 +286,72 @@ function buildExtrudedSnapshot(before: MeshSnapshot, plan: ExtrudePlan, distance
         faces: outFaces,
     };
 }
+
+function buildExtrudedSnapshotIndividual(before: MeshSnapshot, plan: ExtrudePlan, distance: number): MeshSnapshot {
+    const selectedFaceIds = new Set(plan.faceIds);
+    const basePositions = snapshotPositions(before);
+    const outVertices = before.vertices.map((vertex) => ({
+        id: vertex.id,
+        position: { ...vertex.position },
+    }));
+    const outFaces = before.faces
+        .filter((face) => !selectedFaceIds.has(face.id))
+        .map((face) => ({
+            id: face.id,
+            verts: [...face.verts],
+            shading: face.shading,
+        }));
+    const allPositions = new Map<Id, Vec3>(basePositions);
+
+    for (const face of before.faces) {
+        const facePlan = plan.facePlanById.get(face.id);
+        if (!facePlan) continue;
+
+        const offset = scale(facePlan.normal, distance);
+        const topVerts: Id[] = [];
+        for (let i = 0; i < face.verts.length; i++) {
+            const baseId = face.verts[i]!;
+            const topId = facePlan.newVertexIds[i]!;
+            const topPos = add(basePositions.get(baseId)!, offset);
+            topVerts.push(topId);
+            outVertices.push({ id: topId, position: topPos });
+            allPositions.set(topId, topPos);
+        }
+
+        outFaces.push({
+            id: plan.topFaceIdByBase.get(face.id)!,
+            verts: orientFaceTowardNormal(topVerts, allPositions, facePlan.normal),
+            shading: face.shading,
+        });
+
+        for (let i = 0; i < face.verts.length; i++) {
+            const next = (i + 1) % face.verts.length;
+            const baseA = face.verts[i]!;
+            const baseB = face.verts[next]!;
+            const topA = topVerts[i]!;
+            const topB = topVerts[next]!;
+            const sideVerts = [baseA, baseB, topB, topA];
+            const edgeVec = sub(basePositions.get(baseB)!, basePositions.get(baseA)!);
+            const outward = {
+                x: edgeVec.y * offset.z - edgeVec.z * offset.y,
+                y: edgeVec.z * offset.x - edgeVec.x * offset.z,
+                z: edgeVec.x * offset.y - edgeVec.y * offset.x,
+            };
+            outFaces.push({
+                id: facePlan.sideFaceIds[i]!,
+                verts: orientFaceTowardNormal(sideVerts, allPositions, outward),
+                shading: "smooth",
+            });
+        }
+    }
+
+    return {
+        vertices: outVertices,
+        faces: outFaces,
+    };
+}
+
+type ExtrudeMode = "region" | "individual";
 
 function findEdgeIdByVertices(mesh: Mesh, a: Id, b: Id): Id | null {
     const key = edgeKey(a, b);
@@ -285,6 +396,7 @@ function buildAfterSelection(
 
 export class ExtrudeController {
     private active = false;
+    private mode: ExtrudeMode = "region";
     private lastDistance = 0;
     private beforeMesh: MeshSnapshot | null = null;
     private afterMesh: MeshSnapshot | null = null;
@@ -303,6 +415,12 @@ export class ExtrudeController {
     private readonly getPointerClientPos: () => { x: number; y: number };
     private readonly syncCameraForPicking: () => void;
     private readonly requestRenderSync: () => void;
+    private readonly setPreviewArrow: (opts: {
+        origin: Vec3;
+        direction: Vec3;
+        length: number;
+    }) => void;
+    private readonly clearPreviewArrow: () => void;
 
     constructor(
         mesh: Mesh,
@@ -314,6 +432,12 @@ export class ExtrudeController {
         getPointerClientPos: () => { x: number; y: number },
         syncCameraForPicking: () => void,
         requestRenderSync: () => void,
+        setPreviewArrow: (opts: {
+            origin: Vec3;
+            direction: Vec3;
+            length: number;
+        }) => void,
+        clearPreviewArrow: () => void,
     ) {
         this.mesh = mesh;
         this.selection = selection;
@@ -324,10 +448,26 @@ export class ExtrudeController {
         this.getPointerClientPos = getPointerClientPos;
         this.syncCameraForPicking = syncCameraForPicking;
         this.requestRenderSync = requestRenderSync;
+        this.setPreviewArrow = setPreviewArrow;
+        this.clearPreviewArrow = clearPreviewArrow;
     }
 
     isActive(): boolean {
         return this.active;
+    }
+
+    toggleMode(): boolean {
+        if (!this.active || !this.beforeMesh || !this.plan) return false;
+        if (this.plan.initialSelection.faceIds.length === 0) return false;
+
+        this.mode = this.mode === "region" ? "individual" : "region";
+        this.afterMesh =
+            this.mode === "individual"
+                ? buildExtrudedSnapshotIndividual(this.beforeMesh, this.plan, this.lastDistance)
+                : buildExtrudedSnapshot(this.beforeMesh, this.plan, this.lastDistance);
+        this.mesh.restore(this.afterMesh);
+        this.requestRenderSync();
+        return true;
     }
 
     beginFromKey(): void {
@@ -358,8 +498,14 @@ export class ExtrudeController {
         this.plan = plan;
         this.beforeMesh = this.mesh.snapshot();
         this.afterMesh = this.beforeMesh;
+        this.mode = "region";
         this.lastDistance = 0;
         this.active = true;
+        this.setPreviewArrow({
+            origin: plan.center,
+            direction: plan.normal,
+            length: 0.3,
+        });
     }
 
     onPointerMove(): void {
@@ -371,7 +517,15 @@ export class ExtrudeController {
         const delta = new THREE.Vector3().subVectors(this.hit, this.startHit);
         const distance = delta.dot(new THREE.Vector3(this.plan.normal.x, this.plan.normal.y, this.plan.normal.z));
         this.lastDistance = distance;
-        this.afterMesh = buildExtrudedSnapshot(this.beforeMesh, this.plan, distance);
+        this.setPreviewArrow({
+            origin: this.plan.center,
+            direction: distance >= 0 ? this.plan.normal : scale(this.plan.normal, -1),
+            length: Math.max(0.3, Math.abs(distance) + 0.12),
+        });
+        this.afterMesh =
+            this.mode === "individual"
+                ? buildExtrudedSnapshotIndividual(this.beforeMesh, this.plan, distance)
+                : buildExtrudedSnapshot(this.beforeMesh, this.plan, distance);
         this.mesh.restore(this.afterMesh);
         this.requestRenderSync();
     }
@@ -379,6 +533,7 @@ export class ExtrudeController {
     cancel(): void {
         if (!this.active || !this.beforeMesh || !this.plan) return;
         this.mesh.restore(this.beforeMesh);
+        this.clearPreviewArrow();
         this.requestRenderSync();
         this.reset();
     }
@@ -388,6 +543,7 @@ export class ExtrudeController {
 
         if (Math.abs(this.lastDistance) <= 1e-4) {
             this.mesh.restore(this.beforeMesh);
+            this.clearPreviewArrow();
             this.requestRenderSync();
             this.reset();
             return;
@@ -405,12 +561,15 @@ export class ExtrudeController {
                 afterSelection,
             ),
         );
+        this.clearPreviewArrow();
         this.requestRenderSync();
         this.reset();
     }
 
     private reset(): void {
+        this.clearPreviewArrow();
         this.active = false;
+        this.mode = "region";
         this.lastDistance = 0;
         this.beforeMesh = null;
         this.afterMesh = null;

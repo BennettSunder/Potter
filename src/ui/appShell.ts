@@ -1,6 +1,12 @@
 import type { SelectionMode } from "../core/selection/selection";
 export type PrimitiveKind = "cube" | "icosahedron" | "truncatedIcosahedron";
 export type EditorTool = "select" | "move" | "rotate" | "scale" | "extrude";
+export type ContextMenuItem = {
+    id: string;
+    label?: string;
+    disabled?: boolean;
+    separator?: boolean;
+};
 
 const APP_SHELL_CSS_ID = "potter-app-shell-css";
 
@@ -193,6 +199,177 @@ function ensureAppShellStyles() {
         height: 100%;
         display: block;
     }
+
+    .potter-context-menu {
+        position: fixed;
+        min-width: 150px;
+        padding: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        background: rgba(18, 18, 18, 0.96);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(12px);
+        z-index: 50;
+        display: none;
+        max-width: 300px;
+    }
+
+    .potter-context-menu[data-open="true"] {
+        display: block;
+    }
+
+    .potter-context-menu-btn {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: #f3f3f3;
+        text-align: left;
+        font: inherit;
+        padding: 8px 10px;
+        border-radius: 7px;
+        cursor: pointer;
+    }
+
+    .potter-context-menu-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    .potter-context-menu-btn:disabled {
+        color: rgba(255, 255, 255, 0.38);
+        cursor: default;
+    }
+
+    .potter-context-menu-btn:disabled:hover {
+        background: transparent;
+    }
+
+    .potter-context-menu-separator {
+        height: 1px;
+        border: 0;
+        margin: 6px 2px;
+        background: rgba(255, 255, 255, 0.12);
+    }
+
+    .potter-app-menu-anchor {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        z-index: 12;
+    }
+
+    .potter-app-menu-btn {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        border: 1px solid #333;
+        background: #111a;
+        color: #ddd;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: border-color 120ms, background 120ms;
+    }
+
+    .potter-app-menu-btn:hover {
+        border-color: #666;
+        background: #1a1a;
+    }
+
+    .potter-app-menu-btn svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        opacity: 0.92;
+    }
+
+    .potter-app-menu {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        min-width: 170px;
+        padding: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        background: rgba(18, 18, 18, 0.96);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(12px);
+        display: none;
+    }
+
+    .potter-app-menu[data-open="true"] {
+        display: block;
+    }
+
+    .potter-dialog-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(4px);
+        z-index: 80;
+        display: none;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .potter-dialog-backdrop[data-open="true"] {
+        display: flex;
+    }
+
+    .potter-dialog {
+        width: min(360px, calc(100vw - 32px));
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        background: rgba(18, 18, 18, 0.98);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        color: #f3f3f3;
+        padding: 16px;
+        font: inherit;
+    }
+
+    .potter-dialog-title {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 8px;
+    }
+
+    .potter-dialog-body {
+        font-size: 13px;
+        line-height: 1.45;
+        color: rgba(255, 255, 255, 0.86);
+    }
+
+    .potter-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 16px;
+    }
+
+    .potter-dialog-btn {
+        border: 1px solid #333;
+        background: #111a;
+        color: #ddd;
+        border-radius: 8px;
+        min-width: 72px;
+        height: 32px;
+        padding: 0 12px;
+        cursor: pointer;
+        transition: border-color 120ms, background 120ms;
+    }
+
+    .potter-dialog-btn:hover {
+        border-color: #666;
+        background: #1a1a;
+    }
+
+    .potter-dialog-btn[data-variant="primary"] {
+        border-color: #9aa0ff;
+        background: #2a2a55aa;
+    }
     `;
     document.head.appendChild(style);
 }
@@ -270,17 +447,27 @@ function iconRotateArc(): string {
     `;
 }
 
-function iconExtrude(): string {
+function iconHamburger(): string {
     return `
     <svg viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="6" y="8" width="8" height="8"></rect>
-    <path d="M14 10l4-4"></path>
-    <path d="M18 6v4h-4"></path>
-    <path d="M10 8V5"></path>
-    <path d="M14 16h3"></path>
+    <path d="M5 7h14"></path>
+    <path d="M5 12h14"></path>
+    <path d="M5 17h14"></path>
     </svg>
     `;
 }
+
+// function iconExtrude(): string {
+//     return `
+//     <svg viewBox="0 0 24 24" aria-hidden="true">
+//     <rect x="6" y="8" width="8" height="8"></rect>
+//     <path d="M14 10l4-4"></path>
+//     <path d="M18 6v4h-4"></path>
+//     <path d="M10 8V5"></path>
+//     <path d="M14 16h3"></path>
+//     </svg>
+//     `;
+// }
 
 export function mountAppShell(root: HTMLElement): {
     canvas: HTMLCanvasElement;
@@ -290,6 +477,16 @@ export function mountAppShell(root: HTMLElement): {
     onToolChange: (cb: (tool: EditorTool) => void) => void;
     setTool: (tool: EditorTool) => void;
     onPrimitiveSwap: (cb: (kind: PrimitiveKind) => void) => void;
+    onImportObj: (cb: () => void) => void;
+    onExportObj: (cb: () => void) => void;
+    confirmYesNoCancel: (opts: { title: string; message: string; yesLabel?: string; noLabel?: string; cancelLabel?: string }) => Promise<"yes" | "no" | "cancel">;
+    showContextMenu: (opts: {
+        x: number;
+        y: number;
+        items: ContextMenuItem[];
+        onSelect: (id: string) => void;
+    }) => void;
+    hideContextMenu: () => void;
 } {
     ensureAppShellStyles();
 
@@ -344,7 +541,9 @@ export function mountAppShell(root: HTMLElement): {
 
                 <label class="potter-tool" title="Extrude tool" aria-label="Extrude tool">
                     <input type="radio" name="editorTool" value="extrude" />
-                    <span class="potter-tool-btn">${iconExtrude()}</span>
+                    <span class="potter-tool-btn">
+                        <img src="/extrude.svg" alt="" aria-hidden="true" style="height: 24px; filter: brightness(0) invert(1);" />
+                    </span>
                 </label>
             </div>
 
@@ -365,8 +564,31 @@ export function mountAppShell(root: HTMLElement): {
                 </label>
             </div>
 
+            <div class="potter-app-menu-anchor">
+                <button type="button" class="potter-app-menu-btn" id="potterAppMenuBtn" title="Application menu" aria-label="Application menu" aria-haspopup="menu" aria-expanded="false">
+                    ${iconHamburger()}
+                </button>
+                <div class="potter-app-menu" id="potterAppMenu" data-open="false" aria-hidden="true">
+                    <button type="button" class="potter-context-menu-btn" data-app-action="import-obj">Import OBJ</button>
+                    <button type="button" class="potter-context-menu-btn" data-app-action="export-obj">Export OBJ</button>
+                </div>
+            </div>
+
             <div class="potter-viewport-wrap">
                 <canvas id="viewport" class="potter-viewport"></canvas>
+            </div>
+
+            <div class="potter-context-menu" id="potterContextMenu" aria-hidden="true"></div>
+            <div class="potter-dialog-backdrop" id="potterDialogBackdrop" data-open="false" aria-hidden="true">
+                <div class="potter-dialog" role="dialog" aria-modal="true" aria-labelledby="potterDialogTitle">
+                    <div class="potter-dialog-title" id="potterDialogTitle"></div>
+                    <div class="potter-dialog-body" id="potterDialogBody"></div>
+                    <div class="potter-dialog-actions">
+                        <button type="button" class="potter-dialog-btn" id="potterDialogCancelBtn">Cancel</button>
+                        <button type="button" class="potter-dialog-btn" id="potterDialogNoBtn">No</button>
+                        <button type="button" class="potter-dialog-btn" id="potterDialogYesBtn" data-variant="primary">Yes</button>
+                    </div>
+                </div>
             </div>
         </div>
     `;
@@ -376,6 +598,24 @@ export function mountAppShell(root: HTMLElement): {
 
     const selectionEl = root.querySelector<HTMLDivElement>("#selectionText");
     if (!selectionEl) throw new Error("Missing #selectionText");
+    const contextMenuEl = root.querySelector<HTMLDivElement>("#potterContextMenu");
+    if (!contextMenuEl) throw new Error("Missing #potterContextMenu");
+    const appMenuBtn = root.querySelector<HTMLButtonElement>("#potterAppMenuBtn");
+    if (!appMenuBtn) throw new Error("Missing #potterAppMenuBtn");
+    const appMenuEl = root.querySelector<HTMLDivElement>("#potterAppMenu");
+    if (!appMenuEl) throw new Error("Missing #potterAppMenu");
+    const dialogBackdropEl = root.querySelector<HTMLDivElement>("#potterDialogBackdrop");
+    if (!dialogBackdropEl) throw new Error("Missing #potterDialogBackdrop");
+    const dialogTitleEl = root.querySelector<HTMLDivElement>("#potterDialogTitle");
+    if (!dialogTitleEl) throw new Error("Missing #potterDialogTitle");
+    const dialogBodyEl = root.querySelector<HTMLDivElement>("#potterDialogBody");
+    if (!dialogBodyEl) throw new Error("Missing #potterDialogBody");
+    const dialogYesBtn = root.querySelector<HTMLButtonElement>("#potterDialogYesBtn");
+    if (!dialogYesBtn) throw new Error("Missing #potterDialogYesBtn");
+    const dialogNoBtn = root.querySelector<HTMLButtonElement>("#potterDialogNoBtn");
+    if (!dialogNoBtn) throw new Error("Missing #potterDialogNoBtn");
+    const dialogCancelBtn = root.querySelector<HTMLButtonElement>("#potterDialogCancelBtn");
+    if (!dialogCancelBtn) throw new Error("Missing #potterDialogCancelBtn");
 
     const radios = Array.from(
         root.querySelectorAll<HTMLInputElement>('input[name="selMode"]'),
@@ -386,6 +626,121 @@ export function mountAppShell(root: HTMLElement): {
     const primitiveButtons = Array.from(
         root.querySelectorAll<HTMLButtonElement>("button[data-primitive]"),
     );
+    let contextMenuSelect: ((id: string) => void) | null = null;
+    let importObjCb: (() => void) | null = null;
+    let exportObjCb: (() => void) | null = null;
+    let dialogResolve: ((value: "yes" | "no" | "cancel") => void) | null = null;
+
+    const hideContextMenu = () => {
+        contextMenuEl.dataset.open = "false";
+        contextMenuEl.setAttribute("aria-hidden", "true");
+        contextMenuEl.innerHTML = "";
+        contextMenuSelect = null;
+    };
+
+    const hideAppMenu = () => {
+        appMenuEl.dataset.open = "false";
+        appMenuEl.setAttribute("aria-hidden", "true");
+        appMenuBtn.setAttribute("aria-expanded", "false");
+    };
+
+    const closeDialog = (result: "yes" | "no" | "cancel") => {
+        dialogBackdropEl.dataset.open = "false";
+        dialogBackdropEl.setAttribute("aria-hidden", "true");
+        const resolve = dialogResolve;
+        dialogResolve = null;
+        resolve?.(result);
+    };
+
+    const toggleAppMenu = () => {
+        const nextOpen = appMenuEl.dataset.open !== "true";
+        appMenuEl.dataset.open = nextOpen ? "true" : "false";
+        appMenuEl.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+        appMenuBtn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+        if (nextOpen) hideContextMenu();
+    };
+
+    const positionContextMenu = (x: number, y: number) => {
+        contextMenuEl.style.left = "0px";
+        contextMenuEl.style.top = "0px";
+        contextMenuEl.dataset.open = "true";
+        contextMenuEl.setAttribute("aria-hidden", "false");
+
+        const rect = contextMenuEl.getBoundingClientRect();
+        const maxX = window.innerWidth - rect.width - 8;
+        const maxY = window.innerHeight - rect.height - 8;
+        contextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+        contextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+    };
+
+    const showContextMenu = (opts: {
+        x: number;
+        y: number;
+        items: ContextMenuItem[];
+        onSelect: (id: string) => void;
+    }) => {
+        contextMenuEl.innerHTML = "";
+        contextMenuSelect = opts.onSelect;
+
+        for (const item of opts.items) {
+            if (item.separator) {
+                const sep = document.createElement("hr");
+                sep.className = "potter-context-menu-separator";
+                contextMenuEl.appendChild(sep);
+                continue;
+            }
+
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "potter-context-menu-btn";
+            btn.textContent = item.label ?? "";
+            btn.disabled = !!item.disabled;
+            btn.addEventListener("click", () => {
+                if (item.disabled) return;
+                const onSelect = contextMenuSelect;
+                hideContextMenu();
+                onSelect?.(item.id);
+            });
+            contextMenuEl.appendChild(btn);
+        }
+
+        positionContextMenu(opts.x, opts.y);
+    };
+
+    window.addEventListener("pointerdown", (ev) => {
+        if (!contextMenuEl.contains(ev.target as Node)) hideContextMenu();
+        if (!appMenuEl.contains(ev.target as Node) && ev.target !== appMenuBtn) hideAppMenu();
+    }, { capture: true });
+    window.addEventListener("blur", () => {
+        hideContextMenu();
+        hideAppMenu();
+    });
+    window.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+            hideContextMenu();
+            hideAppMenu();
+            if (dialogResolve) closeDialog("cancel");
+        }
+    });
+
+    appMenuBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        toggleAppMenu();
+    });
+    appMenuEl.addEventListener("click", (ev) => {
+        const target = ev.target as HTMLElement | null;
+        const action = target?.closest<HTMLElement>("[data-app-action]")?.dataset.appAction;
+        if (!action) return;
+        hideAppMenu();
+        if (action === "import-obj") importObjCb?.();
+        if (action === "export-obj") exportObjCb?.();
+    });
+    dialogYesBtn.addEventListener("click", () => closeDialog("yes"));
+    dialogNoBtn.addEventListener("click", () => closeDialog("no"));
+    dialogCancelBtn.addEventListener("click", () => closeDialog("cancel"));
+    dialogBackdropEl.addEventListener("pointerdown", (ev) => {
+        if (ev.target === dialogBackdropEl) closeDialog("cancel");
+    });
 
     const setMode = (mode: SelectionMode) => {
         const r = radios.find((x) => x.value === mode);
@@ -406,6 +761,30 @@ export function mountAppShell(root: HTMLElement): {
         setSelectionText: (t: string) => (selectionEl.textContent = t),
         setMode,
         setTool,
+        onImportObj: (cb) => {
+            importObjCb = cb;
+        },
+        onExportObj: (cb) => {
+            exportObjCb = cb;
+        },
+        confirmYesNoCancel: (opts) => {
+            if (dialogResolve) closeDialog("cancel");
+            hideContextMenu();
+            hideAppMenu();
+            dialogTitleEl.textContent = opts.title;
+            dialogBodyEl.textContent = opts.message;
+            dialogYesBtn.textContent = opts.yesLabel ?? "Yes";
+            dialogNoBtn.textContent = opts.noLabel ?? "No";
+            dialogCancelBtn.textContent = opts.cancelLabel ?? "Cancel";
+            dialogBackdropEl.dataset.open = "true";
+            dialogBackdropEl.setAttribute("aria-hidden", "false");
+            return new Promise<"yes" | "no" | "cancel">((resolve) => {
+                dialogResolve = resolve;
+                dialogYesBtn.focus();
+            });
+        },
+        showContextMenu,
+        hideContextMenu,
         onModeChange: (cb) => {
             const fire = () => {
                 const checked = radios.find((r) => r.checked);

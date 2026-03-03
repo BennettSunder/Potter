@@ -21,11 +21,14 @@ export type Vertex = {
     position: Vec3;
 };
 
+export type FaceShading = "smooth" | "flat";
+
 export type Face = {
     id: Id;
     // Polygon face: 3..N vertex IDs.
     // Winding order matters (should be consistent for normals / picking expectations).
     verts: Id[]; // length >= 3
+    shading: FaceShading;
 };
 
 /**
@@ -80,10 +83,10 @@ export class Mesh {
      * Adds a polygon face. Must have at least 3 verts.
      * NOTE: we do not validate planarity/convexity here (renderer triangulates with a fan).
      */
-    addFace(verts: Id[]): Id {
+    addFace(verts: Id[], shading: FaceShading = "smooth"): Id {
         if (verts.length < 3) throw new Error("Face must have at least 3 verts.");
         const id = makeId("f");
-        this.faces.push({ id, verts: [...verts] });
+        this.faces.push({ id, verts: [...verts], shading });
         this.rebuildMaps();
         return id;
     }
@@ -113,6 +116,7 @@ export class Mesh {
             faces: this.faces.map((f) => ({
                 id: f.id,
                 verts: [...f.verts],
+                shading: f.shading,
             })),
         };
     }
@@ -125,6 +129,7 @@ export class Mesh {
         this.faces = snapshot.faces.map((f) => ({
             id: f.id,
             verts: [...f.verts],
+            shading: f.shading ?? "smooth",
         }));
         this.rebuildMaps();
     }
@@ -244,6 +249,19 @@ export class Mesh {
         const i = this.vIndexById.get(id);
         if (i === undefined) throw new Error(`Mesh.setVertexPosition: unknown vertex id ${id}`);
         this.vertices[i].position = pos;
+    }
+
+    setFaceVerts(id: Id, verts: readonly Id[]): void {
+        const i = this.fIndexById.get(id);
+        if (i === undefined) throw new Error(`Mesh.setFaceVerts: unknown face id ${id}`);
+        if (verts.length < 3) throw new Error("Face must have at least 3 verts.");
+        this.faces[i].verts = [...verts];
+    }
+
+    setFaceShading(id: Id, shading: FaceShading): void {
+        const i = this.fIndexById.get(id);
+        if (i === undefined) throw new Error(`Mesh.setFaceShading: unknown face id ${id}`);
+        this.faces[i].shading = shading;
     }
 
     /** Convenience: translate a set of vertices by delta. */

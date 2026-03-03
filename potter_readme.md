@@ -28,7 +28,25 @@ The current focus is **correctness, architecture, and maintainability**, not fea
 - Orbit camera with clean scene setup
 - **Face, edge, and vertex selection modes**
 - Click selection with **Shift multi‑selection**
+- Drag-box marquee selection
+- `Ctrl+Alt` + left-drag camera panning and `Ctrl+Alt+Shift` + left-drag camera rotation for laptop-friendly navigation
 - Visual highlighting for selected components
+- Move / rotate / scale tools with gizmos and keyboard shortcuts
+- Keyboard-started actions preserve the currently selected toolbar tool
+- Keyboard-started modal transforms can continue dragging past the viewport edge
+- Extrusion along the average selected face normal, with a clickable on-mesh extrude arrow and an individual-face mode toggle during active extrusion
+- Modal per-face inset with live preview, left-click confirm, and right-click cancel
+- First-pass knife tool for single-face two-click cuts
+- Face subdivision that stitches neighboring faces instead of leaving split boundaries disconnected
+- Smooth selected vertices / regions
+- Face normal flipping
+- Per-face smooth or flat shading with matching OBJ export smoothing
+- Topology deletion for selected faces / edges / vertices
+- Vertex merge to average position
+- Right-click context menu for selection modes and edit actions
+- Top-right hamburger menu with OBJ import/export and a `Yes / No / Cancel` save-before-import prompt
+- Select-all and invert-selection shortcuts by current selection mode
+- Undo / redo for the current editing command set
 - Stable ID‑based mesh representation  
   (selection and identity are not tied to array indices)
 - Centralized numeric tolerances  

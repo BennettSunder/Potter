@@ -226,7 +226,6 @@ export function setSelectedFaces(
     const srcGeo = meshObj.geometry as THREE.BufferGeometry;
     const posAttr = srcGeo.getAttribute("position") as THREE.BufferAttribute;
     const indexAttr = srcGeo.getIndex();
-    if (!indexAttr) return;
 
     // Count total triangles across all selected faces so we can preallocate exactly.
     let triCount = 0;
@@ -249,9 +248,9 @@ export function setSelectedFaces(
         if (!tris || tris.length === 0) continue;
 
         for (const tri of tris) {
-            const i0 = indexAttr.getX(tri * 3 + 0);
-            const i1 = indexAttr.getX(tri * 3 + 1);
-            const i2 = indexAttr.getX(tri * 3 + 2);
+            const i0 = indexAttr ? indexAttr.getX(tri * 3 + 0) : tri * 3 + 0;
+            const i1 = indexAttr ? indexAttr.getX(tri * 3 + 1) : tri * 3 + 1;
+            const i2 = indexAttr ? indexAttr.getX(tri * 3 + 2) : tri * 3 + 2;
 
             // Write three positions (unindexed output geometry)
             outPos[vOut + 0] = posAttr.getX(i0);
