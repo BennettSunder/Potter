@@ -5,7 +5,7 @@ This file is a practical guide to the current `src/` tree.
 It is optimized for:
 - finding the right file quickly
 - understanding which layer owns which state
-- tracing common flows like click selection, drag-box selection, primitive swaps, grab, rotate, scale, and extrude
+- tracing common flows like click selection, drag-box selection, primitive swaps, context-menu actions, select-all/invert-selection, grab, rotate, scale, extrude, and interactive modal inset
 - calling out unfinished or misleading areas
 
 ## Project shape
@@ -57,6 +57,8 @@ If you are new to the repo, read files in this order:
 7. [`src/app/rotateController.ts`](src/app/rotateController.ts)
 8. [`src/app/scaleController.ts`](src/app/scaleController.ts)
 9. [`src/app/extrudeController.ts`](src/app/extrudeController.ts)
+10. [`src/app/insetController.ts`](src/app/insetController.ts)
+11. [`src/app/knifeController.ts`](src/app/knifeController.ts)
 
 That path gives the least confusing view of how the app is actually wired today.
 
@@ -76,7 +78,12 @@ What happens:
 - `ThreeRenderer` is created with the UI canvas
 - the initial cube mesh is created in core and pushed into the renderer
 - selection state and command manager are created
-- UI callbacks, pointer handlers, keyboard shortcuts, and primitive swap actions are wired
+- UI callbacks, pointer handlers, keyboard shortcuts, context-menu actions, and primitive swap actions are wired
+- the top-right app menu in `src/ui/appShell.ts` routes OBJ import/export actions back into `src/app/main.ts`, including a shell-owned `Yes / No / Cancel` import confirmation dialog
+- face shading mode now lives on each core face, and both the renderer and OBJ export path respect that per-face smooth/flat setting
+- left-click selection is intercepted in `src/ui/bindings.ts`, but `Ctrl+Alt` + left-drag is allowed through for camera panning; adding `Shift` switches that left-drag camera action to rotation
+- keyboard-started modal transforms request pointer lock in `src/app/main.ts`, which lets their drag math continue past the viewport edges using accumulated relative pointer motion
+- keyboard-started modal actions preserve the currently armed toolbar tool instead of changing the persistent tool highlight
 
 ### Selection / picking flow
 
@@ -131,10 +138,11 @@ Flow:
 1. `app/main.ts` listens for `G`
 2. `GrabController.beginFromKey()` expands the current selection into vertex IDs
 3. a drag plane is built from camera direction through the selection centroid
-4. preview movement is applied only to renderer buffers
-5. commit should execute `MoveVerticesCommand`
-6. cancel restores preview geometry without changing core state
-7. the move tool highlight persists after the transform ends until the user switches tools or another shortcut changes it
+4. `src/app/main.ts` requests pointer lock for the modal transform so dragging can continue without cursor edge limits
+5. preview movement is applied only to renderer buffers
+6. commit should execute `MoveVerticesCommand`
+7. cancel restores preview geometry without changing core state
+8. the move tool highlight persists after the transform ends until the user switches tools or another shortcut changes it
 
 Important caveat:
 
@@ -175,10 +183,11 @@ Flow:
 1. `app/main.ts` listens for `S`
 2. `ScaleController.beginFromKey()` expands the current selection into vertex IDs
 3. the average selected vertex position is used as the scale center
-4. pointer motion changes the radius from the center on a camera-facing drag plane
-5. preview writes explicit per-vertex positions into renderer buffers
-6. commit executes `ScaleVerticesCommand`
-7. the scale tool highlight persists after the transform ends until the user switches tools or another shortcut changes it
+4. `src/app/main.ts` requests pointer lock for the modal transform so dragging can continue without cursor edge limits
+5. pointer motion changes the radius from the center on a camera-facing drag plane
+6. preview writes explicit per-vertex positions into renderer buffers
+7. commit executes `ScaleVerticesCommand`
+8. the scale tool highlight persists after the transform ends until the user switches tools or another shortcut changes it
 
 ### Rotate flow (`R`)
 
@@ -195,10 +204,11 @@ Flow:
 1. `app/main.ts` listens for `R`
 2. `RotateController.beginFromKey()` expands the current selection into vertex IDs
 3. the average selected vertex position is used as the rotation center
-4. pointer motion on a camera-facing drag plane determines a signed rotation angle
-5. preview writes explicit per-vertex rotated positions into renderer buffers
-6. commit executes `RotateVerticesCommand`
-7. the click that commits rotation is consumed so it does not also deselect the selection
+4. `src/app/main.ts` requests pointer lock for the modal transform so dragging can continue without cursor edge limits
+5. pointer motion on a camera-facing drag plane determines a signed rotation angle
+6. preview writes explicit per-vertex rotated positions into renderer buffers
+7. commit executes `RotateVerticesCommand`
+8. the click that commits rotation is consumed so it does not also deselect the selection
 
 ### Extrude flow (`E`)
 
@@ -212,13 +222,104 @@ Main files:
 
 Flow:
 
-1. `app/main.ts` listens for `E` or the extrude toolbar button
+1. `app/main.ts` listens for `E` and also arms extrusion from the extrude toolbar button or the right-click context menu
 2. `ExtrudeController.beginFromKey()` derives a face region from the current face selection or from faces touched by the current edge/vertex selection
 3. the controller computes one average polygon normal for that region
-4. pointer motion changes the extrusion distance along that shared normal
-5. preview rebuilds a temporary mesh snapshot with duplicated top vertices, top faces, and boundary bridge faces
-6. commit executes `ReplaceMeshCommand` with the new topology and selects the new top region
-7. cancel restores the pre-extrude mesh snapshot and selection state
+4. when the extrude tool is armed and a face selection exists, `ThreeRenderer` shows a white averaged-normal arrow handle at the region centroid
+5. clicking that arrow starts the modal extrude drag
+6. `src/app/main.ts` requests pointer lock for the modal transform so dragging can continue without cursor edge limits
+7. pointer motion changes the extrusion distance along that shared normal
+8. region mode replaces the selected cap with the moved top shell and boundary side walls; the original selected faces are not left in place
+9. pressing `E` again during an active face extrusion toggles to an `individual` mode where each selected face extrudes along its own local normal and separates from adjacent selected faces
+10. commit executes `ReplaceMeshCommand` with the new topology and selects the new top region
+11. cancel restores the pre-extrude mesh snapshot and selection state
+
+### Topology edit actions
+
+Main files:
+
+- [`src/app/main.ts`](src/app/main.ts)
+- [`src/core/commands/mesh/flipFacesCommand.ts`](src/core/commands/mesh/flipFacesCommand.ts)
+- [`src/core/commands/mesh/deleteSelectionCommand.ts`](src/core/commands/mesh/deleteSelectionCommand.ts)
+- [`src/core/commands/mesh/mergeVerticesCommand.ts`](src/core/commands/mesh/mergeVerticesCommand.ts)
+- [`src/core/commands/mesh/insetFacesCommand.ts`](src/core/commands/mesh/insetFacesCommand.ts)
+- [`src/core/commands/mesh/smoothVerticesCommand.ts`](src/core/commands/mesh/smoothVerticesCommand.ts)
+- [`src/core/mesh.ts`](src/core/mesh.ts)
+
+Flow:
+
+1. keyboard shortcuts and the right-click context menu both route into `app/main.ts`
+2. `FlipFacesCommand` reverses face winding for the selected faces
+3. `DeleteSelectionCommand` deletes selected faces directly or deletes faces touched by the current edge/vertex selection, then prunes orphaned vertices
+4. `MergeVerticesCommand` collapses the selected vertices to their average position, rewrites affected faces, and drops degenerates
+5. `SubdivideFacesCommand` splits the selected faces and also inserts any new edge midpoints into adjacent non-selected face loops so the surrounding topology stays stitched
+6. `InsetFacesCommand` performs an independent inset on each selected face by creating an inset polygon plus bridge quads around the perimeter
+7. `SmoothVerticesCommand` performs one Laplacian-style smoothing pass over the vertices implied by the current selection by moving each toward the average of its neighboring connected vertices
+8. `app/main.ts` rebuilds renderer state after each topology edit so overlays and handles stay aligned
+
+### Inset flow (`I`)
+
+Main files:
+
+- [`src/app/main.ts`](src/app/main.ts)
+- [`src/app/insetController.ts`](src/app/insetController.ts)
+- [`src/core/commands/mesh/insetFacesCommand.ts`](src/core/commands/mesh/insetFacesCommand.ts)
+- [`src/core/commands/mesh/replaceMeshCommand.ts`](src/core/commands/mesh/replaceMeshCommand.ts)
+
+Flow:
+
+1. `app/main.ts` listens for `I` or the `Inset Faces` context-menu action
+2. `InsetController.beginFromKey()` snapshots the current face selection and starts a modal preview
+3. `src/app/main.ts` requests pointer lock for the modal transform so dragging can continue without cursor edge limits
+4. horizontal pointer motion changes the inset amount
+5. preview rebuilds the mesh through the shared `buildInsetSnapshot()` helper
+6. left click or `Enter` commits with `ReplaceMeshCommand`
+7. right click or `Esc` cancels and restores the original mesh snapshot
+
+### Knife flow (`K`)
+
+Main files:
+
+- [`src/app/main.ts`](src/app/main.ts)
+- [`src/app/knifeController.ts`](src/app/knifeController.ts)
+- [`src/core/commands/mesh/knifeFaceCommand.ts`](src/core/commands/mesh/knifeFaceCommand.ts)
+
+Flow:
+
+1. `app/main.ts` listens for `K` or the `Knife Face` context-menu action in face mode
+2. `KnifeController.begin()` enters a click-driven knife state
+3. the first left click stores a picked point on a face
+4. the second left click on the same face executes `KnifeFaceCommand`
+5. `KnifeFaceCommand` projects both picked points onto the nearest boundary edges of that face, inserts the two cut vertices, and replaces the source face with two faces
+6. right click or `Esc` cancels the knife state without changing the mesh
+
+### Selection shortcut flow
+
+Main files:
+
+- [`src/app/main.ts`](src/app/main.ts)
+- [`src/core/selection/selection.ts`](src/core/selection/selection.ts)
+- [`src/core/commands/selectionCommands/setSelectionCommand.ts`](src/core/commands/selectionCommands/setSelectionCommand.ts)
+
+Flow:
+
+1. `A` selects all components of the current selection mode
+2. `Ctrl+Shift+I` / `Cmd+Shift+I` inverts the current mode-specific selection against the full set of face, edge, or vertex IDs in the mesh
+3. both operations route through the same command-backed selection update helper as click and box selection
+
+### Context menu flow
+
+Main files:
+
+- [`src/ui/appShell.ts`](src/ui/appShell.ts)
+- [`src/app/main.ts`](src/app/main.ts)
+
+Flow:
+
+1. right-click on the viewport opens a custom shell-owned context menu
+2. `app/main.ts` builds grouped items based on the current tool and selection state
+3. menu actions call the same tool-switch and command helpers already used by buttons and keyboard shortcuts
+4. horizontal separators split the menu into selection modes and edit actions
 
 ### Primitive swap flow
 
@@ -258,6 +359,7 @@ Owns:
 - the live `selection` instance
 - the active selection `mode`
 - the active editor tool
+- context-menu action routing
 - the `CommandManager`
 - UI sync helpers
 - keyboard shortcuts

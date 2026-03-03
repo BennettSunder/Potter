@@ -63,6 +63,10 @@ export class ThreeRenderer {
   private meshObj?: THREE.Mesh;
   private backfaceObj?: THREE.Mesh;
   private gizmoAnchor = new THREE.Object3D();
+  private extrudeArrow: THREE.ArrowHelper | null = null;
+  private extrudeArrowPickObjects: THREE.Object3D[] = [];
+  private extrudeArrowShaftCollider: THREE.Mesh | null = null;
+  private extrudeArrowHeadCollider: THREE.Mesh | null = null;
 
   // Shared raycaster used by face picking; edge/vertex picking is screen-space.
   private raycaster = new THREE.Raycaster();
@@ -99,6 +103,7 @@ export class ThreeRenderer {
   // vertIndexById:
   //   vertexId -> render position index
   private vertIndexById = new Map<Id, number>();
+  private vertIndicesById = new Map<Id, number[]>();
 
 
   private vertexPoints: THREE.Points | null = null;
@@ -202,9 +207,10 @@ export class ThreeRenderer {
     this.controls.addEventListener("change", () => this.requestRender());
 
     // Mouse mapping: we intentionally disable left-click rotation
-    // so left-click can be used for selection/dragging tools.
+    // during normal interaction; ui/bindings.ts blocks standard left clicks
+    // and only lets them through for explicit camera-drag modifiers.
     this.controls.mouseButtons = {
-      LEFT: null as unknown as THREE.MOUSE,
+      LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.ROTATE,
     };
 
@@ -266,9 +272,15 @@ export class ThreeRenderer {
 
     // Convert core vertex IDs -> render indices using vertIndexById
     const indices: number[] = [];
+    const seen = new Set<number>();
     for (const id of vertexIds) {
-      const ri = this.vertIndexById.get(id);
-      if (ri !== undefined) indices.push(ri);
+      const renderIndices = this.vertIndicesById.get(id);
+      if (!renderIndices) continue;
+      for (const ri of renderIndices) {
+        if (seen.has(ri)) continue;
+        seen.add(ri);
+        indices.push(ri);
+      }
     }
 
     // Snapshot baseline positions so preview is reversible and stable
@@ -324,11 +336,13 @@ export class ThreeRenderer {
     const arr = posAttr.array as Float32Array;
 
     for (const [id, pos] of positions.entries()) {
-      const i = this.vertIndexById.get(id);
-      if (i === undefined) continue;
-      arr[i * 3 + 0] = pos.x;
-      arr[i * 3 + 1] = pos.y;
-      arr[i * 3 + 2] = pos.z;
+      const renderIndices = this.vertIndicesById.get(id);
+      if (!renderIndices) continue;
+      for (const i of renderIndices) {
+        arr[i * 3 + 0] = pos.x;
+        arr[i * 3 + 1] = pos.y;
+        arr[i * 3 + 2] = pos.z;
+      }
     }
 
     posAttr.needsUpdate = true;
@@ -385,6 +399,105 @@ export class ThreeRenderer {
   forceCameraUpdate(): void {
     this.controls?.update?.();
     this.camera.updateMatrixWorld(true);
+  }
+
+  setLeftMouseCameraAction(action: THREE.MOUSE): void {
+    this.controls.mouseButtons.LEFT = action;
+  }
+
+  setExtrudePreviewArrow(opts: {
+    origin: { x: number; y: number; z: number };
+    direction: { x: number; y: number; z: number };
+    length: number;
+  }): void {
+    const dir = new THREE.Vector3(opts.direction.x, opts.direction.y, opts.direction.z);
+    if (dir.lengthSq() < 1e-8) {
+      this.clearExtrudePreviewArrow();
+      return;
+    }
+
+    dir.normalize();
+    const origin = new THREE.Vector3(opts.origin.x, opts.origin.y, opts.origin.z);
+    const length = Math.max(0.001, opts.length);
+
+    if (!this.extrudeArrow) {
+      this.extrudeArrow = new THREE.ArrowHelper(dir, origin, length, 0xffffff, 0.12, 0.08);
+      const lineMat = this.extrudeArrow.line.material as THREE.LineBasicMaterial;
+      const coneMat = this.extrudeArrow.cone.material as THREE.MeshBasicMaterial;
+      lineMat.depthTest = false;
+      lineMat.depthWrite = false;
+      coneMat.depthTest = false;
+      coneMat.depthWrite = false;
+      lineMat.color.setHex(0xffffff);
+      coneMat.color.setHex(0xffffff);
+      this.extrudeArrow.renderOrder = 1000;
+      this.extrudeArrow.line.renderOrder = 1000;
+      this.extrudeArrow.cone.renderOrder = 1000;
+
+      const colliderMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.extrudeArrowShaftCollider = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.12, 0.12, 1, 12),
+        colliderMat.clone(),
+      );
+      this.extrudeArrowHeadCollider = new THREE.Mesh(
+        new THREE.ConeGeometry(0.2, 0.4, 16),
+        colliderMat.clone(),
+      );
+      this.extrudeArrowShaftCollider.renderOrder = 1000;
+      this.extrudeArrowHeadCollider.renderOrder = 1000;
+      this.extrudeArrow.add(this.extrudeArrowShaftCollider, this.extrudeArrowHeadCollider);
+      this.extrudeArrowPickObjects = [this.extrudeArrowShaftCollider, this.extrudeArrowHeadCollider];
+      this.scene.add(this.extrudeArrow);
+    }
+
+    this.extrudeArrow.position.copy(origin);
+    this.extrudeArrow.setDirection(dir);
+    const headLength = Math.min(0.18, length * 0.35);
+    const headWidth = Math.min(0.12, length * 0.24);
+    const shaftLength = Math.max(0.001, length - headLength);
+    this.extrudeArrow.setLength(length, headLength, headWidth);
+    if (this.extrudeArrowShaftCollider) {
+      this.extrudeArrowShaftCollider.scale.set(1, shaftLength, 1);
+      this.extrudeArrowShaftCollider.position.set(0, shaftLength * 0.5, 0);
+    }
+    if (this.extrudeArrowHeadCollider) {
+      this.extrudeArrowHeadCollider.scale.set(
+        Math.max(0.7, headWidth / 0.2),
+        Math.max(0.7, headLength / 0.4),
+        Math.max(0.7, headWidth / 0.2),
+      );
+      this.extrudeArrowHeadCollider.position.set(0, shaftLength + headLength * 0.5, 0);
+    }
+    this.requestRender();
+  }
+
+  extrudeArrowPointerDown(ndcX: number, ndcY: number): boolean {
+    if (!this.extrudeArrow || this.extrudeArrowPickObjects.length === 0) return false;
+    this.raycaster.setFromCamera({ x: ndcX, y: ndcY } as any, this.camera);
+    return this.raycaster.intersectObjects(this.extrudeArrowPickObjects, true).length > 0;
+  }
+
+  clearExtrudePreviewArrow(): void {
+    if (!this.extrudeArrow) return;
+    this.scene.remove(this.extrudeArrow);
+    this.extrudeArrow.line.geometry.dispose();
+    this.extrudeArrow.cone.geometry.dispose();
+    (this.extrudeArrow.line.material as THREE.LineBasicMaterial).dispose();
+    (this.extrudeArrow.cone.material as THREE.MeshBasicMaterial).dispose();
+    this.extrudeArrowShaftCollider?.geometry.dispose();
+    (this.extrudeArrowShaftCollider?.material as THREE.MeshBasicMaterial | undefined)?.dispose();
+    this.extrudeArrowHeadCollider?.geometry.dispose();
+    (this.extrudeArrowHeadCollider?.material as THREE.MeshBasicMaterial | undefined)?.dispose();
+    this.extrudeArrow = null;
+    this.extrudeArrowPickObjects = [];
+    this.extrudeArrowShaftCollider = null;
+    this.extrudeArrowHeadCollider = null;
+    this.requestRender();
   }
 //
 
@@ -458,23 +571,34 @@ export class ThreeRenderer {
   setMesh(mesh: Mesh): void {
     const verts = mesh.getVertices();
     const faces = mesh.getFaces();
-
-    // -----------------
-    // 1) Vertex buffers
-    // -----------------
-    const pos = new Float32Array(verts.length * 3);
-    verts.forEach((v, i) => {
-      pos[i * 3 + 0] = v.position.x;
-      pos[i * 3 + 1] = v.position.y;
-      pos[i * 3 + 2] = v.position.z;
+    const vertexPosById = new Map<Id, THREE.Vector3>();
+    verts.forEach((v) => {
+      vertexPosById.set(v.id, new THREE.Vector3(v.position.x, v.position.y, v.position.z));
     });
 
-    // Stable ID bridge: render index -> vertexId
-    this.indexToVertId = verts.map((v) => v.id);
+    const smoothNormalById = new Map<Id, THREE.Vector3>();
+    for (const v of verts) smoothNormalById.set(v.id, new THREE.Vector3());
 
-    // Fast lookup: vertexId -> render index
-    this.vertIndexById.clear();
-    this.indexToVertId.forEach((id, i) => this.vertIndexById.set(id, i));
+    const faceNormalById = new Map<Id, THREE.Vector3>();
+    for (const f of faces) {
+      if (f.verts.length < 3) continue;
+      const a = vertexPosById.get(f.verts[0])!;
+      const b = vertexPosById.get(f.verts[1])!;
+      const c = vertexPosById.get(f.verts[2])!;
+      const normal = new THREE.Vector3()
+        .subVectors(b, a)
+        .cross(new THREE.Vector3().subVectors(c, a));
+      if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+      else normal.normalize();
+      faceNormalById.set(f.id, normal);
+      if (f.shading === "smooth") {
+        for (const vId of f.verts) smoothNormalById.get(vId)?.add(normal);
+      }
+    }
+    for (const normal of smoothNormalById.values()) {
+      if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+      else normal.normalize();
+    }
 
     // -----------------------
     // 2) Index buffer (tris)
@@ -484,34 +608,36 @@ export class ThreeRenderer {
     this.triIndicesByFaceId.clear();
     this.faceVertexIdsByFaceId.clear();
     this.edgeVertexIdsByEdgeId.clear();
+    this.indexToVertId = [];
+    this.vertIndexById.clear();
+    this.vertIndicesById.clear();
 
-    const idx: number[] = [];
+    const positionsOut: number[] = [];
+    const normalsOut: number[] = [];
     let triOut = 0;
 
     for (const f of faces) {
       if (f.verts.length < 3) continue;
       this.faceVertexIdsByFaceId.set(f.id, [...f.verts]);
 
-      // Convert face vertex IDs -> render indices
-      const vidx: number[] = [];
-      for (const vId of f.verts) {
-        const ri = this.vertIndexById.get(vId);
-        if (ri === undefined) {
-          vidx.length = 0;
-          break;
-        }
-        vidx.push(ri);
-      }
-      if (vidx.length < 3) continue;
-
       const faceTriIndices: number[] = [];
+      const faceNormal = faceNormalById.get(f.id) ?? new THREE.Vector3(0, 0, 1);
 
-      for (let i = 1; i + 1 < vidx.length; i++) {
-        const i0 = vidx[0];
-        const i1 = vidx[i];
-        const i2 = vidx[i + 1];
-
-        idx.push(i0, i1, i2);
+      for (let i = 1; i + 1 < f.verts.length; i++) {
+        const triVerts = [f.verts[0]!, f.verts[i]!, f.verts[i + 1]!];
+        for (const vId of triVerts) {
+          const pos = vertexPosById.get(vId);
+          if (!pos) continue;
+          positionsOut.push(pos.x, pos.y, pos.z);
+          const normal = f.shading === "flat" ? faceNormal : (smoothNormalById.get(vId) ?? faceNormal);
+          normalsOut.push(normal.x, normal.y, normal.z);
+          const renderIndex = this.indexToVertId.length;
+          this.indexToVertId.push(vId);
+          if (!this.vertIndexById.has(vId)) this.vertIndexById.set(vId, renderIndex);
+          const renderIndices = this.vertIndicesById.get(vId);
+          if (renderIndices) renderIndices.push(renderIndex);
+          else this.vertIndicesById.set(vId, [renderIndex]);
+        }
 
         this.triToFaceId[triOut] = f.id;
         faceTriIndices.push(triOut);
@@ -524,13 +650,9 @@ export class ThreeRenderer {
       }
     }
 
-    const IndexArray = verts.length > 65535 ? Uint32Array : Uint16Array;
-    const idxTyped = new IndexArray(idx);
-
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setIndex(new THREE.BufferAttribute(idxTyped, 1));
-    geo.computeVertexNormals();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positionsOut, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(normalsOut, 3));
     geo.computeBoundingSphere();
 
     // -----------------------------
@@ -950,17 +1072,22 @@ export class ThreeRenderer {
 
     const meshArr = meshPosAttr.array as Float32Array;
 
-    // ---- Vertex points (1:1 with mesh vertices)
+    // ---- Vertex points (mesh vertices -> first matching render vertex)
     if (this.vertexPoints) {
       const vGeo = this.vertexPoints.geometry as THREE.BufferGeometry;
       const vPosAttr = vGeo.getAttribute("position") as THREE.BufferAttribute | undefined;
       if (vPosAttr) {
         const vArr = vPosAttr.array as Float32Array;
-        if (vArr.length === meshArr.length) {
-          vArr.set(meshArr);
-          vPosAttr.needsUpdate = true;
-          vGeo.computeBoundingSphere();
+        for (let i = 0; i < this.indexToVertexId.length; i++) {
+          const vertexId = this.indexToVertexId[i];
+          const renderIndex = this.vertIndexById.get(vertexId);
+          if (renderIndex == null) continue;
+          vArr[i * 3 + 0] = meshArr[renderIndex * 3 + 0];
+          vArr[i * 3 + 1] = meshArr[renderIndex * 3 + 1];
+          vArr[i * 3 + 2] = meshArr[renderIndex * 3 + 2];
         }
+        vPosAttr.needsUpdate = true;
+        vGeo.computeBoundingSphere();
       }
     }
 
